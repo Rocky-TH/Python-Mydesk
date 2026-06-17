@@ -11,15 +11,16 @@ from PyQt6.QtGui import QFont
 
 
 class QuicklyCmdPlugin:
-    def __init__(self, config):
+    def __init__(self, config, config_manager=None):
         self.config = config
+        self._config_manager = config_manager
         self.name = config['name']
         self.display_name = config.get('display_name', config['name'])
         self.widget = None
 
     def get_widget(self):
         if self.widget is None:
-            self.widget = QuicklyCmdWidget(self.config)
+            self.widget = QuicklyCmdWidget(self.config, self._config_manager)
         return self.widget
 
     def activate(self):
@@ -32,27 +33,19 @@ class QuicklyCmdPlugin:
 class QuicklyCmdWidget(QWidget):
     """快捷命令插件 - 包含编译工具和字节转换工具"""
 
-    def __init__(self, config=None, parent=None):
+    def __init__(self, config=None, config_manager=None, parent=None):
         super().__init__(parent)
         self.config = config or {}
+        self._config_manager = config_manager
         self.compile_config = self.load_compile_config()
         self.init_ui()
 
     def load_compile_config(self):
-        """加载编译配置文件"""
-        # 尝试从插件配置文件加载
-        config_path = os.path.join(
-            os.path.dirname(__file__),
-            'config.json'
-        )
-        
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    full_config = json.load(f)
-                    return full_config.get('compile', {})
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"加载编译配置失败: {e}")
+        """加载编译配置"""
+        if self._config_manager:
+            plugin_config = self._config_manager.get_plugin_config("QuicklyCmd")
+            if plugin_config:
+                return plugin_config.get('compile', {})
         
         # 返回默认配置
         return {

@@ -1,44 +1,34 @@
-import os
-import json
+import uuid
+from datetime import datetime
 from typing import List, Dict, Optional
 
 
 class ConnectionManager:
     """会话连接管理器，管理 SSH/Telnet/Serial 连接配置的增删改查"""
     
-    def __init__(self, config_path: str = None):
-        self._config_path = config_path or self._get_default_path()
+    def __init__(self, config_manager=None):
+        self._config_manager = config_manager
         self._connections: List[Dict] = []
+        self._data_key = "connections"
+        self._plugin_name = "Terminal"
         self.load()
-
-    def _get_default_path(self) -> str:
-        """获取默认连接配置文件路径"""
-        return os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "connections.json"
-        )
 
     def load(self) -> bool:
         """加载连接配置"""
-        if os.path.exists(self._config_path):
-            try:
-                with open(self._config_path, 'r', encoding='utf-8') as f:
-                    self._connections = json.load(f)
+        if self._config_manager:
+            data = self._config_manager.get_plugin_data(self._plugin_name, self._data_key)
+            if data:
+                self._connections = data if isinstance(data, list) else []
                 return True
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"加载连接配置失败: {e}")
-                self._connections = []
+        self._connections = []
         return False
 
     def save(self) -> bool:
         """保存连接配置"""
-        try:
-            with open(self._config_path, 'w', encoding='utf-8') as f:
-                json.dump(self._connections, f, indent=4, ensure_ascii=False)
-            return True
-        except IOError as e:
-            print(f"保存连接配置失败: {e}")
-            return False
+        if self._config_manager:
+            self._config_manager.set_plugin_data(self._plugin_name, self._data_key, self._connections)
+            return self._config_manager.save_plugin_data(self._plugin_name, self._data_key)
+        return False
 
     def get_connections(self) -> List[Dict]:
         """获取所有连接"""

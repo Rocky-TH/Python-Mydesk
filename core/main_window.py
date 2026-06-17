@@ -15,7 +15,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.plugin_manager = plugin_manager
         self.config_manager = config_manager or ConfigManager(
-            ConfigManager.get_default_config_path()
+            ConfigManager.get_default_config_dir()
         )
         self.plugin_widgets = {}
         self.current_plugin_name = None
@@ -189,9 +189,9 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(QLabel("MyDesk v1.0.0"))
 
     def load_plugins(self):
-        # 使用 ConfigManager 加载插件
+        # 使用 ConfigManager 加载插件，传递 config_manager 给 PluginManager
         plugin_configs = self.config_manager.get_plugins()
-        self.plugin_manager.load_plugins(plugin_configs)
+        self.plugin_manager.load_plugins(plugin_configs, self.config_manager)
 
         self.status_label.setText(f"已加载 {len(self.plugin_manager.plugins)} 个插件")
 

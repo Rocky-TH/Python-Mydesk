@@ -10,20 +10,24 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QAction, QTextCursor, QColor, QKeyEvent
-from .strategies import ConnectionContext, SSHStrategy, TelnetStrategy, SerialStrategy
+from .connection_context import ConnectionContext
+from .ssh_connection import SSHConnection
+from .telnet_connection import TelnetConnection
+from .serial_connection import SerialConnection
 from .connection_manager import ConnectionManager
 
 
 class TerminalPlugin:
-    def __init__(self, config):
+    def __init__(self, config, config_manager=None):
         self.config = config
+        self._config_manager = config_manager
         self.name = config['name']
         self.display_name = config.get('display_name', config['name'])
         self.widget = None
 
     def get_widget(self):
         if self.widget is None:
-            self.widget = TerminalWidget(self.config)
+            self.widget = TerminalWidget(self.config, self._config_manager)
         return self.widget
 
     def activate(self):
@@ -263,9 +267,9 @@ class SessionTab(QWidget):
         self.write_output(f"正在连接 {conn.get('name', '')} ({conn_type})...\n", "#ffff00")
 
         strategy_map = {
-            "ssh": SSHStrategy(),
-            "telnet": TelnetStrategy(),
-            "serial": SerialStrategy()
+            "ssh": SSHConnection(),
+            "telnet": TelnetConnection(),
+            "serial": SerialConnection()
         }
 
         strategy = strategy_map.get(conn_type)
@@ -321,10 +325,11 @@ class SessionTab(QWidget):
 class TerminalWidget(QWidget):
     connection_status_changed = pyqtSignal(str)
 
-    def __init__(self, config=None, parent=None):
+    def __init__(self, config=None, config_manager=None, parent=None):
         super().__init__(parent)
         self.config = config or {}
-        self.connection_manager = ConnectionManager()
+        self._config_manager = config_manager
+        self.connection_manager = ConnectionManager(config_manager)
         self.sessions = {}  # session_id -> SessionTab
         self.session_counter = 0
         self.current_session_id = None
@@ -772,6 +777,23 @@ class ConnectionDialog(QDialog):
         self.password_input.setPlaceholderText("密码")
         self.config_layout.addRow("密码:", self.password_input)
 
+        # SSH key file config (hidden by default)
+        self.key_file_input = QLineEdit()
+        self.key_file_input.setPlaceholderText("密钥文件路径")
+        self.key_file_input.hide()
+        
+        self.key_browse_btn = QPushButton("浏览...")
+        self.key_browse_btn.setFixedWidth(60)
+        self.key_browse_btn.clicked.connect(self.browse_key_file)
+        self.key_browse_btn.hide()
+        
+        key_file_row_widget = QWidget()
+        key_file_row_layout = QHBoxLayout(key_file_row_widget)
+        key_file_row_layout.setContentsMargins(0, 0, 0, 0)
+        key_file_row_layout.addWidget(self.key_file_input)
+        key_file_row_layout.addWidget(self.key_browse_btn)
+        self.config_layout.addRow("密钥文件:", key_file_row_widget)
+
         # Serial config fields (hidden by default)
         self.serial_port_combo = QComboBox()
         self.serial_port_combo.addItems([f'COM{i}' for i in range(1, 21)])
@@ -821,6 +843,10 @@ class ConnectionDialog(QDialog):
         self.serial_baud_combo.hide()
         self.serial_baud_label.hide()
         
+        # 隐藏密钥相关字段
+        self.key_file_input.hide()
+        self.key_browse_btn.hide()
+        
         if conn_type == "serial":
             self.host_input.hide()
             self.port_input.hide()
@@ -841,6 +867,8 @@ class ConnectionDialog(QDialog):
             
             if conn_type == "ssh":
                 self.port_input.setValue(22)
+                self.key_file_input.show()
+                self.key_browse_btn.show()
             elif conn_type == "telnet":
                 self.port_input.setValue(23)
 
@@ -854,6 +882,7 @@ class ConnectionDialog(QDialog):
             self.port_input.setValue(config.get('port', 22))
             self.username_input.setText(config.get('username', ''))
             self.password_input.setText(config.get('password', ''))
+            self.key_file_input.setText(config.get('key_file', ''))
         elif conn_type == "telnet":
             self.host_input.setText(config.get('host', ''))
             self.port_input.setValue(config.get('port', 23))
@@ -862,6 +891,18 @@ class ConnectionDialog(QDialog):
         elif conn_type == "serial":
             self.serial_port_combo.setCurrentText(config.get('port', 'COM1'))
             self.serial_baud_combo.setCurrentText(str(config.get('baud', 115200)))
+
+    def browse_key_file(self):
+        """浏览选择密钥文件"""
+        from PyQt6.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "选择密钥文件", 
+            "", 
+            "密钥文件 (*.pem *.key);;所有文件 (*)"
+        )
+        if file_path:
+            self.key_file_input.setText(file_path)
 
     def get_connection_data(self):
         """获取连接数据"""
@@ -872,7 +913,8 @@ class ConnectionDialog(QDialog):
                 'host': self.host_input.text(),
                 'port': self.port_input.value(),
                 'username': self.username_input.text(),
-                'password': self.password_input.text()
+                'password': self.password_input.text(),
+                'key_file': self.key_file_input.text()
             }
         elif conn_type == "telnet":
             config = {

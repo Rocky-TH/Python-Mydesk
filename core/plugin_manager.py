@@ -4,11 +4,14 @@ import sys
 
 
 class PluginManager:
-    def __init__(self):
+    def __init__(self, config_manager=None):
         self.plugins = {}
         self.plugin_configs = {}
+        self._config_manager = config_manager
 
-    def load_plugins(self, plugin_configs):
+    def load_plugins(self, plugin_configs, config_manager=None):
+        if config_manager:
+            self._config_manager = config_manager
         for config in plugin_configs:
             try:
                 self.load_plugin(config)
@@ -32,8 +35,11 @@ class PluginManager:
         module = importlib.import_module(module_name)
         plugin_class = getattr(module, class_name)
 
-        # Instantiate plugin
-        plugin_instance = plugin_class(config)
+        # Instantiate plugin with config and config_manager
+        if self._config_manager:
+            plugin_instance = plugin_class(config, self._config_manager)
+        else:
+            plugin_instance = plugin_class(config)
 
         self.plugins[name] = plugin_instance
         self.plugin_configs[name] = config

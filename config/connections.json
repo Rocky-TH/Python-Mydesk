@@ -1,0 +1,16 @@
+[
+    {
+        "name": "test.rebex.net",
+        "type": "ssh",
+        "config": {
+            "host": "test.rebex.net",
+            "port": 22,
+            "username": "demo",
+            "password": "password",
+            "key_file": ""
+        },
+        "created_at": "2026-06-18T00:44:09.628477",
+        "updated_at": "2026-06-18T00:44:09.628511",
+        "id": "a78451c1"
+    }
+]
