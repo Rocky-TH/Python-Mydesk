@@ -129,12 +129,25 @@ class SSHConnection(ConnectionBase):
         """读取远程输出（非阻塞）"""
         if not self.connected or not self.shell:
             return ""
-        
+
         response = ""
         try:
+            # 等待数据准备好
+            import time
+            time.sleep(timeout)
+            
             while self.shell.recv_ready():
                 data = self.shell.recv(4096).decode('utf-8', errors='replace')
                 response += data
+                time.sleep(0.05)  # 短暂等待更多数据
+                
+            # 检查是否有更多数据正在传输
+            if self.shell.recv_ready():
+                time.sleep(0.1)
+                while self.shell.recv_ready():
+                    data = self.shell.recv(4096).decode('utf-8', errors='replace')
+                    response += data
+                    time.sleep(0.05)
         except:
             pass
         return response

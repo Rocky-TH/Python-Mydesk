@@ -1,20 +1,23 @@
 import os
 import threading
 import time
+from stat import S_ISDIR
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QSplitter,
     QLabel, QLineEdit, QComboBox, QSpinBox, QPushButton,
     QTextEdit, QTabWidget, QMessageBox, QCheckBox,
     QListWidget, QListWidgetItem, QMenu, QDialog,
-    QPlainTextEdit
+    QPlainTextEdit, QFileDialog, QProgressDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QAction, QTextCursor, QColor, QKeyEvent
+from PyQt6.QtGui import QFont, QAction, QTextCursor, QColor, QKeyEvent, QTextCharFormat
 from .connection_context import ConnectionContext
 from .ssh_connection import SSHConnection
 from .telnet_connection import TelnetConnection
 from .serial_connection import SerialConnection
 from .connection_manager import ConnectionManager
+from .connection_factory import ConnectionFactory
+from .ansi_parser import ANSIParser
 
 
 class TerminalPlugin:
@@ -37,6 +40,31 @@ class TerminalPlugin:
         pass
 
 
+class TerminalEdit(QTextEdit):
+    """自定义终端编辑控件，用于拦截键盘事件"""
+
+    key_pressed = pyqtSignal(QKeyEvent)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setStyleSheet("""
+            QTextEdit {
+                background-color: #0c0c0c;
+                color: #cccccc;
+                border: none;
+            }
+            QTextEdit:focus {
+                border: 2px solid #007acc;
+            }
+        """)
+
+    def keyPressEvent(self, event):
+        """拦截所有键盘事件并发送给父组件处理"""
+        self.key_pressed.emit(event)
+        event.accept()
+
+
 class SessionTab(QWidget):
     """单个会话标签页 - 交互式终端"""
     def __init__(self, session_id, session_name, parent=None):
@@ -49,24 +77,18 @@ class SessionTab(QWidget):
         self.history_index = -1
         self.current_input = ""
         self.interactive_mode = False
-        
+        self.ansi_parser = ANSIParser()
+
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Terminal area
-        self.terminal_display = QTextEdit()
+        # Terminal area - 使用自定义控件
+        self.terminal_display = TerminalEdit()
         self.terminal_display.setFont(QFont("Consolas", 11))
-        self.terminal_display.setReadOnly(True)
-        self.terminal_display.setStyleSheet("""
-            QTextEdit {
-                background-color: #0c0c0c;
-                color: #cccccc;
-                border: none;
-            }
-        """)
+        self.terminal_display.key_pressed.connect(self.handle_key_press)
         layout.addWidget(self.terminal_display)
 
         # Status bar
@@ -96,16 +118,82 @@ class SessionTab(QWidget):
         self.output_timer = QTimer(self)
         self.output_timer.timeout.connect(self.poll_remote_output)
 
+    # ========== 公共接口 ==========
+
+    def get_connection(self):
+        """获取当前连接上下文"""
+        return self.connection_context
+
+    def send(self, data):
+        """发送数据到远程"""
+        if self.connection_context.is_connected():
+            strategy = self.connection_context._strategy
+            if hasattr(strategy, 'send_raw'):
+                strategy.send_raw(data)
+                return True
+        return False
+
+    def recv(self, timeout=0.1):
+        """接收远程数据"""
+        if self.connection_context.is_connected():
+            strategy = self.connection_context._strategy
+            if hasattr(strategy, 'read_output'):
+                return strategy.read_output(timeout)
+        return ""
+
+    # ========== 内部方法 ==========
+
     def write_output(self, text, color=None):
-        """写入终端输出"""
+        """写入终端输出，支持ANSI转义序列和回车符处理"""
         cursor = self.terminal_display.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        
-        fmt = self.make_format(color or "#cccccc")
-        cursor.setCharFormat(fmt)
-        cursor.insertText(text)
+
+        # 先处理回车符 \r\n -> \n, 然后处理单独的 \r
+        text = text.replace('\r\n', '\n')
+
+        # 如果指定了颜色，直接使用
+        if color:
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color))
+            cursor.setCharFormat(fmt)
+            self._insert_text_with_cr(cursor, text)
+        else:
+            # 使用ANSI解析器处理转义序列
+            parts = self.ansi_parser.parse(text)
+            for part_text, part_format in parts:
+                cursor.setCharFormat(part_format)
+                self._insert_text_with_cr(cursor, part_text)
+
         self.terminal_display.setTextCursor(cursor)
         self.terminal_display.ensureCursorVisible()
+
+    def _insert_text_with_cr(self, cursor, text):
+        """插入文本，处理 \r 回车符和 \b 退格符"""
+        i = 0
+        while i < len(text):
+            if text[i] == '\r':
+                cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+                i += 1
+            elif text[i] == '\b':
+                # 退格：删除前一个字符
+                cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
+                i += 1
+            elif text[i] == '\x7f':
+                # DEL 键：删除当前字符
+                cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
+                i += 1
+            else:
+                # 找到下一个控制字符
+                next_control = len(text)
+                for j in range(i, len(text)):
+                    if text[j] in '\r\b\x7f':
+                        next_control = j
+                        break
+                chunk = text[i:next_control]
+                cursor.insertText(chunk)
+                i = next_control
 
     def make_format(self, color):
         """创建文本格式"""
@@ -118,10 +206,10 @@ class SessionTab(QWidget):
         """轮询远程输出（交互模式）"""
         if not self.connection_context.is_connected():
             return
-        
+
         strategy = self.connection_context._strategy
         if hasattr(strategy, 'read_output'):
-            output = strategy.read_output()
+            output = strategy.read_output(timeout=0.1)
             if output:
                 self.write_output(output)
 
@@ -132,19 +220,58 @@ class SessionTab(QWidget):
 
         key = event.key()
         text = event.text()
+        modifiers = event.modifiers()
 
         # 获取底层策略
         strategy = self.connection_context._strategy
         has_raw = hasattr(strategy, 'send_raw') and self.interactive_mode
 
-        # 方向键（命令历史）- 仅交互模式可用
+        # Ctrl+C - 发送中断信号
+        if key == Qt.Key.Key_C and modifiers == Qt.KeyboardModifier.ControlModifier:
+            if has_raw:
+                strategy.send_raw("\x03")  # ETX (Ctrl+C)
+            return
+
+        # 方向键
         if key == Qt.Key.Key_Up:
             if has_raw:
+                strategy.send_raw("\x1b[A")  # ANSI 上箭头
                 self.navigate_history(-1)
             return
         elif key == Qt.Key.Key_Down:
             if has_raw:
+                strategy.send_raw("\x1b[B")  # ANSI 下箭头
                 self.navigate_history(1)
+            return
+        elif key == Qt.Key.Key_Left:
+            if has_raw:
+                strategy.send_raw("\x1b[D")  # ANSI 左箭头
+            return
+        elif key == Qt.Key.Key_Right:
+            if has_raw:
+                strategy.send_raw("\x1b[C")  # ANSI 右箭头
+            return
+
+        # Home / End
+        if key == Qt.Key.Key_Home:
+            if has_raw:
+                strategy.send_raw("\x1b[H")  # ANSI Home
+            return
+        elif key == Qt.Key.Key_End:
+            if has_raw:
+                strategy.send_raw("\x1b[F")  # ANSI End
+            return
+
+        # Tab
+        if key == Qt.Key.Key_Tab:
+            if has_raw:
+                strategy.send_raw("\t")
+            return
+
+        # Esc
+        if key == Qt.Key.Key_Escape:
+            if has_raw:
+                strategy.send_raw("\x1b")
             return
 
         # 回车
@@ -155,20 +282,24 @@ class SessionTab(QWidget):
                     self.command_history.append(self.current_input)
                 self.history_index = len(self.command_history)
                 self.current_input = ""
-                strategy.send_raw("\r")
+                strategy.send_raw("\n")
             else:
                 self.execute_command()
             return
 
-        # 退格
+        # 退格 / 删除
         if key == Qt.Key.Key_Backspace:
             if has_raw:
                 if len(self.current_input) > 0:
                     self.current_input = self.current_input[:-1]
-                    strategy.send_raw("\b")
+                strategy.send_raw("\x7f")  # DEL 键 (大多数SSH服务器期望的退格)
             elif len(self.current_input) > 0:
                 self.current_input = self.current_input[:-1]
                 self.redraw_input_line()
+            return
+        elif key == Qt.Key.Key_Delete:
+            if has_raw:
+                strategy.send_raw("\x1b[3~")  # ANSI Delete
             return
 
         # 普通字符
@@ -241,20 +372,6 @@ class SessionTab(QWidget):
         prompt = self.get_prompt()
         self.write_output(f"{prompt} ", "#00ff00")
 
-    def keyPressEvent(self, event):
-        """处理键盘事件"""
-        if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Left, Qt.Key.Key_Right):
-            self.handle_key_press(event)
-            event.accept()
-        elif event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.handle_key_press(event)
-            event.accept()
-        elif event.text() and len(event.text()) == 1 and event.text().isprintable():
-            self.handle_key_press(event)
-            event.accept()
-        else:
-            super().keyPressEvent(event)
-
     def connect_with_config(self, conn):
         """使用保存的连接配置进行连接"""
         conn_type = conn.get('type')
@@ -266,13 +383,8 @@ class SessionTab(QWidget):
         self.terminal_display.clear()
         self.write_output(f"正在连接 {conn.get('name', '')} ({conn_type})...\n", "#ffff00")
 
-        strategy_map = {
-            "ssh": SSHConnection(),
-            "telnet": TelnetConnection(),
-            "serial": SerialConnection()
-        }
-
-        strategy = strategy_map.get(conn_type)
+        # 使用工厂模式创建连接
+        strategy = ConnectionFactory.create_connection(conn_type)
         if strategy:
             self.connection_context.set_strategy(strategy)
             success = self.connection_context.connect(config)
@@ -280,35 +392,39 @@ class SessionTab(QWidget):
             if success:
                 self.status_label.setText("已连接")
                 self.status_label.setStyleSheet("color: #00ff00; font-weight: bold; font-size: 11px;")
-                
+
                 host = config.get('host', '')
                 port = config.get('port', '')
                 self.connection_info.setText(f"{host}:{port}" if host else config.get('port', ''))
                 self.connection_type_label.setText(conn_type.upper())
-                
+
                 # 检测是否支持交互模式
                 if hasattr(strategy, 'send_raw') and hasattr(strategy, 'read_output'):
                     self.interactive_mode = True
                     # 等待shell初始化并读取初始输出
                     import time
-                    time.sleep(0.5)
-                    initial_output = strategy.read_output()
+                    time.sleep(1.0)  # 增加等待时间
+                    initial_output = strategy.read_output(timeout=0.5)
                     if initial_output:
                         self.write_output(initial_output)
                     # 启动输出轮询
-                    self.output_timer.start(50)
+                    self.output_timer.start(100)
                 else:
                     self.interactive_mode = False
                     self.write_output("连接成功!\n", "#00ff00")
                     self.write_output("-" * 50 + "\n", "#888888")
                     self.show_input_line()
-                
+
                 self.setFocus()
             else:
                 self.write_output("连接失败!\n", "#ff0000")
                 self.write_output("请检查连接参数是否正确\n", "#ff6666")
                 self.status_label.setText("连接失败")
                 self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold; font-size: 11px;")
+        else:
+            self.write_output(f"不支持的连接类型: {conn_type}\n", "#ff0000")
+            self.status_label.setText("连接失败")
+            self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold; font-size: 11px;")
 
     def disconnect(self):
         """断开连接"""
@@ -941,11 +1057,14 @@ class SFTPDialog(QDialog):
     def __init__(self, connection_context, parent=None):
         super().__init__(parent)
         self.connection_context = connection_context
+        self.sftp = None
+        self.current_remote_dir = "/home/"
         self.init_ui()
+        self.init_sftp()
 
     def init_ui(self):
         self.setWindowTitle("SFTP 文件传输")
-        self.setGeometry(300, 300, 600, 400)
+        self.setGeometry(300, 300, 700, 500)
         self.setStyleSheet("""
             QDialog {
                 background-color: #2d2d30;
@@ -973,60 +1092,238 @@ class SFTPDialog(QDialog):
             QPushButton:hover {
                 background-color: #005a9e;
             }
+            QListWidget::item:selected {
+                background-color: #007acc;
+            }
+            QListWidget::item:hover {
+                background-color: #3d3d40;
+            }
         """)
 
         layout = QVBoxLayout(self)
 
-        # Local path
+        # 连接状态
+        self.status_label = QLabel("SFTP状态: 未连接")
+        self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+        layout.addWidget(self.status_label)
+
+        # 本地路径
         local_layout = QHBoxLayout()
         local_layout.addWidget(QLabel("本地路径:"))
         self.local_path = QLineEdit()
         self.local_path.setText(os.path.expanduser("~"))
         local_layout.addWidget(self.local_path)
+        self.local_browse_btn = QPushButton("浏览...")
+        self.local_browse_btn.setFixedWidth(80)
+        self.local_browse_btn.clicked.connect(self.browse_local)
+        local_layout.addWidget(self.local_browse_btn)
         layout.addLayout(local_layout)
 
-        # Remote path
+        # 远程路径
         remote_layout = QHBoxLayout()
         remote_layout.addWidget(QLabel("远程路径:"))
         self.remote_path = QLineEdit()
-        self.remote_path.setText("/home/")
+        self.remote_path.setText(self.current_remote_dir)
+        self.remote_path.returnPressed.connect(self.on_remote_path_changed)
         remote_layout.addWidget(self.remote_path)
         layout.addLayout(remote_layout)
 
-        # File list
+        # 文件列表
         self.file_list = QListWidget()
+        self.file_list.itemDoubleClicked.connect(self.on_item_double_click)
         layout.addWidget(self.file_list)
 
-        # Buttons
+        # 按钮
         btn_layout = QHBoxLayout()
-        upload_btn = QPushButton("上传")
-        download_btn = QPushButton("下载")
-        refresh_btn = QPushButton("刷新")
+        self.upload_btn = QPushButton("上传到远程")
+        self.download_btn = QPushButton("下载到本地")
+        self.refresh_btn = QPushButton("刷新列表")
         close_btn = QPushButton("关闭")
         close_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3d3d40;
             }
         """)
-        btn_layout.addWidget(upload_btn)
-        btn_layout.addWidget(download_btn)
-        btn_layout.addWidget(refresh_btn)
+        btn_layout.addWidget(self.upload_btn)
+        btn_layout.addWidget(self.download_btn)
+        btn_layout.addWidget(self.refresh_btn)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
 
-        upload_btn.clicked.connect(self.upload)
-        download_btn.clicked.connect(self.download)
-        refresh_btn.clicked.connect(self.refresh)
+        self.upload_btn.clicked.connect(self.upload)
+        self.download_btn.clicked.connect(self.download)
+        self.refresh_btn.clicked.connect(self.refresh)
         close_btn.clicked.connect(self.close)
 
-    def upload(self):
-        QMessageBox.information(self, "提示", "上传功能待实现")
+    def init_sftp(self):
+        """初始化SFTP连接"""
+        strategy = self.connection_context._strategy
+        if not isinstance(strategy, SSHConnection):
+            self.status_label.setText("SFTP状态: 仅支持SSH连接")
+            self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+            self.set_buttons_enabled(False)
+            return
 
-    def download(self):
-        QMessageBox.information(self, "提示", "下载功能待实现")
+        if not strategy.client:
+            self.status_label.setText("SFTP状态: SSH未连接")
+            self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+            self.set_buttons_enabled(False)
+            return
+
+        try:
+            self.sftp = strategy.client.open_sftp()
+            self.current_remote_dir = self.sftp.normalize(".")
+            self.remote_path.setText(self.current_remote_dir)
+            self.status_label.setText(f"SFTP状态: 已连接 ({strategy.host})")
+            self.status_label.setStyleSheet("color: #00ff00; font-weight: bold;")
+            self.refresh()
+        except Exception as e:
+            self.status_label.setText(f"SFTP状态: 连接失败 ({str(e)})")
+            self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+            self.set_buttons_enabled(False)
+
+    def set_buttons_enabled(self, enabled):
+        """设置按钮状态"""
+        self.upload_btn.setEnabled(enabled)
+        self.download_btn.setEnabled(enabled)
+        self.refresh_btn.setEnabled(enabled)
+
+    def browse_local(self):
+        """浏览本地目录"""
+        directory = QFileDialog.getExistingDirectory(self, "选择本地目录", self.local_path.text())
+        if directory:
+            self.local_path.setText(directory)
+
+    def on_remote_path_changed(self):
+        """远程路径改变"""
+        path = self.remote_path.text()
+        if path:
+            self.current_remote_dir = path
+            self.refresh()
+
+    def on_item_double_click(self, item):
+        """双击进入目录"""
+        if not self.sftp:
+            return
+
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        if data['type'] == 'dir':
+            self.current_remote_dir = data['path']
+            self.remote_path.setText(self.current_remote_dir)
+            self.refresh()
+        elif data['type'] == 'parent':
+            # 返回上级目录
+            try:
+                parent = self.sftp.normalize("..")
+                self.current_remote_dir = parent
+                self.remote_path.setText(self.current_remote_dir)
+                self.refresh()
+            except:
+                pass
 
     def refresh(self):
+        """刷新远程文件列表"""
         self.file_list.clear()
-        self.file_list.addItem("[模拟] file1.txt")
-        self.file_list.addItem("[模拟] file2.txt")
-        self.file_list.addItem("[模拟] directory/")
+
+        if not self.sftp:
+            self.file_list.addItem("SFTP未连接")
+            return
+
+        try:
+            # 添加上级目录
+            parent_item = QListWidgetItem("../")
+            parent_item.setData(Qt.ItemDataRole.UserRole, {'type': 'parent'})
+            self.file_list.addItem(parent_item)
+
+            # 列出文件
+            for entry in self.sftp.listdir_attr(self.current_remote_dir):
+                name = entry.filename
+                if S_ISDIR(entry.st_mode):
+                    name += "/"
+                    icon = "[目录] "
+                else:
+                    icon = "[文件] "
+
+                size = self.format_size(entry.st_size) if not S_ISDIR(entry.st_mode) else ""
+                item_text = f"{icon}{name:<30} {size}"
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    'type': 'dir' if S_ISDIR(entry.st_mode) else 'file',
+                    'name': entry.filename,
+                    'path': f"{self.current_remote_dir}/{entry.filename}".replace("//", "/"),
+                    'size': entry.st_size
+                })
+                self.file_list.addItem(item)
+
+            self.status_label.setText(f"SFTP状态: 已连接 - {self.current_remote_dir}")
+        except Exception as e:
+            self.file_list.addItem(f"错误: {str(e)}")
+
+    def format_size(self, size):
+        """格式化文件大小"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
+
+    def upload(self):
+        """上传文件到远程"""
+        if not self.sftp:
+            QMessageBox.warning(self, "警告", "SFTP未连接")
+            return
+
+        local_file, _ = QFileDialog.getOpenFileName(self, "选择要上传的文件", self.local_path.text())
+        if not local_file:
+            return
+
+        filename = os.path.basename(local_file)
+        remote_file = f"{self.current_remote_dir}/{filename}".replace("//", "/")
+
+        try:
+            self.sftp.put(local_file, remote_file)
+            QMessageBox.information(self, "成功", f"上传完成:\n{filename}")
+            self.refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"上传失败:\n{str(e)}")
+
+    def download(self):
+        """下载文件到本地"""
+        if not self.sftp:
+            QMessageBox.warning(self, "警告", "SFTP未连接")
+            return
+
+        item = self.file_list.currentItem()
+        if not item:
+            QMessageBox.information(self, "提示", "请先选择要下载的文件")
+            return
+
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data or data['type'] != 'file':
+            QMessageBox.information(self, "提示", "只能选择文件进行下载")
+            return
+
+        local_dir = self.local_path.text()
+        if not os.path.isdir(local_dir):
+            QMessageBox.warning(self, "警告", "本地路径不是有效目录")
+            return
+
+        local_file = os.path.join(local_dir, data['name'])
+
+        try:
+            self.sftp.get(data['path'], local_file)
+            QMessageBox.information(self, "成功", f"下载完成:\n{data['name']}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"下载失败:\n{str(e)}")
+
+    def closeEvent(self, event):
+        """关闭时清理SFTP连接"""
+        if self.sftp:
+            try:
+                self.sftp.close()
+            except:
+                pass
+        event.accept()
