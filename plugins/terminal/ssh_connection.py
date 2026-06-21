@@ -125,31 +125,31 @@ class SSHConnection(ConnectionBase):
             except:
                 pass
 
-    def read_output(self, timeout=0.1):
-        """读取远程输出（非阻塞）"""
+    def read_output(self, timeout=0.05):
+        """读取远程输出（非阻塞），优化性能"""
         if not self.connected or not self.shell:
             return ""
 
         response = ""
         try:
-            # 等待数据准备好
-            import time
-            time.sleep(timeout)
+            # 使用更短的等待时间，提高响应速度
+            start_time = time.time()
             
+            # 读取所有可用数据，不阻塞
             while self.shell.recv_ready():
-                data = self.shell.recv(4096).decode('utf-8', errors='replace')
+                data = self.shell.recv(8192).decode('utf-8', errors='replace')
                 response += data
-                time.sleep(0.05)  # 短暂等待更多数据
                 
-            # 检查是否有更多数据正在传输
-            if self.shell.recv_ready():
-                time.sleep(0.1)
-                while self.shell.recv_ready():
-                    data = self.shell.recv(4096).decode('utf-8', errors='replace')
-                    response += data
-                    time.sleep(0.05)
-        except:
-            pass
+                # 避免无限循环，设置超时
+                if time.time() - start_time > timeout:
+                    break
+                
+                # 短暂等待更多数据
+                time.sleep(0.01)
+                
+        except Exception as e:
+            return ""
+            
         return response
 
     def is_connected(self):

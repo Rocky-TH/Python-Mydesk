@@ -5,15 +5,18 @@ from PyQt6.QtGui import QColor, QTextCharFormat, QFont
 class ANSIParser:
     """ANSI转义序列解析器，用于处理终端颜色和格式"""
 
-    # ANSI转义序列正则表达式
+    # ANSI转义序列正则表达式（预编译）
     ANSI_PATTERN = re.compile(r'\x1B\[[0-9;]*[mK]')
+
+    # ANSI颜色代码映射（使用缓存）
+    _color_cache = {}
 
     # ANSI颜色代码映射
     COLOR_MAP = {
         30: QColor(0, 0, 0),           # 黑色
         31: QColor(205, 0, 0),         # 红色
         32: QColor(0, 205, 0),         # 绿色
-        33: QColor( 205, 205, 0),      # 黄色
+        33: QColor(205, 205, 0),       # 黄色
         34: QColor(0, 0, 238),         # 蓝色
         35: QColor(205, 0, 205),       # 品红
         36: QColor(0, 205, 205),       # 青色
@@ -51,7 +54,7 @@ class ANSIParser:
     def __init__(self):
         self.current_format = QTextCharFormat()
         self.default_foreground = QColor(204, 204, 204)  # #cccccc
-        self.default_background = QColor(12, 12, 12)     # #0c0c0c
+        self.default_background = QColor(30, 30, 30)     # #1e1e1e (与主题一致)
         self.reset_format()
 
     def reset_format(self):
@@ -60,8 +63,16 @@ class ANSIParser:
         self.current_format.setForeground(self.default_foreground)
         self.current_format.setBackground(self.default_background)
 
+    def parse_fast(self, text):
+        """快速解析：仅提取纯文本，忽略ANSI序列（用于大量输出）"""
+        return self.ANSI_PATTERN.sub('', text)
+
     def parse(self, text):
         """解析包含ANSI转义序列的文本，返回(纯文本, 格式列表)"""
+        # 快速检查是否包含ANSI序列
+        if '\x1b' not in text:
+            return [(text, QTextCharFormat(self.current_format))]
+        
         parts = []
         last_end = 0
 

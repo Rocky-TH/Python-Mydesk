@@ -11,6 +11,12 @@
             "display_name": "终端",
             "module": "plugins.terminal",
             "main_class": "TerminalPlugin"
+        },
+        {
+            "name": "RemoteCmd",
+            "display_name": "远程命令",
+            "module": "plugins.remote_cmd",
+            "main_class": "RemoteCmdPlugin"
         }
     ],
     "settings": {

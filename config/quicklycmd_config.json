@@ -6,44 +6,92 @@
     "toolbar": [],
     "menu": null,
     "compile": {
-        "environments": [
+        "compile_environments": [
             {
                 "name": "本地环境",
                 "server": "localhost",
                 "path": "/opt/build",
                 "docker": null,
-                "description": "本地编译环境"
+                "description": "本地编译环境",
+                "connection": null
             },
             {
                 "name": "开发服务器",
                 "server": "192.168.1.100",
                 "path": "/home/dev/build",
                 "docker": "dev-container",
-                "description": "开发环境编译服务器"
+                "description": "开发环境编译服务器",
+                "connection": {
+                    "type": "ssh",
+                    "host": "192.168.1.100",
+                    "port": 22,
+                    "username": "dev",
+                    "password": "",
+                    "key_file": ""
+                }
             },
             {
                 "name": "生产服务器",
                 "server": "192.168.1.200",
                 "path": "/home/prod/build",
                 "docker": "prod-container",
-                "description": "生产环境编译服务器"
+                "description": "生产环境编译服务器",
+                "connection": {
+                    "type": "ssh",
+                    "host": "192.168.1.200",
+                    "port": 22,
+                    "username": "prod",
+                    "password": "",
+                    "key_file": ""
+                }
             },
             {
                 "name": "Docker环境-A",
                 "server": "localhost",
                 "path": "/workspace/build",
                 "docker": "build-env-a:latest",
-                "description": "Docker编译环境A"
+                "description": "Docker编译环境A",
+                "connection": null
             },
             {
                 "name": "Docker环境-B",
                 "server": "localhost",
                 "path": "/workspace/build",
                 "docker": "build-env-b:latest",
-                "description": "Docker编译环境B"
+                "description": "Docker编译环境B",
+                "connection": null
+            },
+            {
+                "name": "串口设备",
+                "server": "/dev/ttyUSB0",
+                "path": "/flash",
+                "docker": null,
+                "description": "串口连接设备",
+                "connection": {
+                    "type": "serial",
+                    "port": "/dev/ttyUSB0",
+                    "baud": 115200,
+                    "bytesize": 8,
+                    "parity": "N",
+                    "stopbits": 1
+                }
+            },
+            {
+                "name": "Telnet设备",
+                "server": "192.168.1.101",
+                "path": "/config",
+                "docker": null,
+                "description": "Telnet连接设备",
+                "connection": {
+                    "type": "telnet",
+                    "host": "192.168.1.101",
+                    "port": 23,
+                    "username": "admin",
+                    "password": ""
+                }
             }
         ],
-        "components": [
+        "compile_components": [
             {
                 "name": "全部组件",
                 "targets": ["all"],
