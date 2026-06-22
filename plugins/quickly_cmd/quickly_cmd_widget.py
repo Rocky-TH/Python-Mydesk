@@ -11,16 +11,17 @@ from PyQt6.QtGui import QFont
 
 
 class QuicklyCmdPlugin:
-    def __init__(self, config, config_manager=None):
+    def __init__(self, config, config_manager=None, plugin_manager=None):
         self.config = config
         self._config_manager = config_manager
+        self._plugin_manager = plugin_manager
         self.name = config['name']
         self.display_name = config.get('display_name', config['name'])
         self.widget = None
 
     def get_widget(self):
         if self.widget is None:
-            self.widget = QuicklyCmdWidget(self.config, self._config_manager)
+            self.widget = QuicklyCmdWidget(self.config, self._config_manager, self._plugin_manager)
         return self.widget
 
     def activate(self):
@@ -33,12 +34,21 @@ class QuicklyCmdPlugin:
 class QuicklyCmdWidget(QWidget):
     """快捷命令插件 - 包含编译工具和字节转换工具"""
 
-    def __init__(self, config=None, config_manager=None, parent=None):
+    def __init__(self, config=None, config_manager=None, plugin_manager=None, parent=None):
         super().__init__(parent)
         self.config = config or {}
         self._config_manager = config_manager
+        self._plugin_manager = plugin_manager
+        self._remote_cmd_plugin = None
+        self._current_connection = None
         self.compile_config = self.load_compile_config()
         self.init_ui()
+
+    def _get_remote_cmd_plugin(self):
+        """获取 RemoteCmd 插件实例"""
+        if not self._remote_cmd_plugin and self._plugin_manager:
+            self._remote_cmd_plugin = self._plugin_manager.get_plugin("RemoteCmd")
+        return self._remote_cmd_plugin
 
     def load_compile_config(self):
         """加载编译配置"""
@@ -458,7 +468,7 @@ class QuicklyCmdWidget(QWidget):
         return widget
 
     def update_detail_info(self):
-        """更新配置详情显示"""
+        """更新配置详情显示，并自动连接到编译环境"""
         env_data = self.compile_env_combo.currentData()
         if env_data:
             server = env_data.get('server', 'N/A')
@@ -469,9 +479,88 @@ class QuicklyCmdWidget(QWidget):
             info = f"服务器: {server} | 路径: {path} | Docker: {docker}"
             if desc:
                 info += f"\n说明: {desc}"
+            
             self.detail_text.setText(info)
             text_success = self.get_style('text_success', '#00ff00')
             self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {self.get_font_size('small', '11px')};")
+            
+            self._auto_connect_and_discover_components(env_data)
+
+    def _auto_connect_and_discover_components(self, env_data):
+        """自动连接到编译环境并发现组件"""
+        remote_cmd = self._get_remote_cmd_plugin()
+        if not remote_cmd:
+            return
+        
+        env_name = env_data.get('name', '')
+        
+        if env_data.get('connection'):
+            self.detail_text.setText(self.detail_text.text() + "\n连接中...")
+            
+            success, msg = remote_cmd.connect(env_name)
+            if success:
+                text_success = self.get_style('text_success', '#00ff00')
+                self.detail_text.setText(self.detail_text.text() + f"\n{msg}")
+                self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {self.get_font_size('small', '11px')};")
+                self._current_connection = env_name
+                
+                path = env_data.get('path', '.')
+                self._discover_components(path)
+            else:
+                text_error = self.get_style('text_error', '#ff6b6b')
+                self.detail_text.setText(self.detail_text.text() + f"\n[连接失败] {msg}")
+                self.detail_text.setStyleSheet(f"color: {text_error}; font-size: {self.get_font_size('small', '11px')};")
+        else:
+            path = env_data.get('path', '.')
+            self._discover_components(path)
+
+    def _discover_components(self, path):
+        """发现当前路径下的编译组件"""
+        discovered_components = []
+        
+        script_dir = os.path.join(path, 'script')
+        make_rom_path = os.path.join(script_dir, 'make_rom.sh')
+        
+        if os.path.exists(make_rom_path):
+            component_name = os.path.basename(path)
+            discovered_components.append({
+                'name': component_name,
+                'targets': [component_name],
+                'description': f"基于 make_rom.sh 的 {component_name} 组件"
+            })
+        
+        component_dirs = ['support_components', 'functional_components', 'buiness_components']
+        for comp_dir in component_dirs:
+            full_path = os.path.join(path, comp_dir)
+            if os.path.isdir(full_path):
+                for item in os.listdir(full_path):
+                    item_path = os.path.join(full_path, item)
+                    if os.path.isdir(item_path):
+                        discovered_components.append({
+                            'name': item,
+                            'targets': [item],
+                            'description': f"{comp_dir} 下的 {item} 组件"
+                        })
+        
+        default_components = self.compile_config.get('compile_components', [])
+        
+        all_components = []
+        existing_names = set()
+        
+        for comp in default_components:
+            all_components.append(comp)
+            existing_names.add(comp['name'])
+        
+        for comp in discovered_components:
+            if comp['name'] not in existing_names:
+                all_components.append(comp)
+                existing_names.add(comp['name'])
+        
+        self.compile_component_combo.blockSignals(True)
+        self.compile_component_combo.clear()
+        for comp in all_components:
+            self.compile_component_combo.addItem(comp['name'], comp)
+        self.compile_component_combo.blockSignals(False)
 
     def create_byte_convert_tool(self):
         """创建字节转换工具"""

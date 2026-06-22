@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 from stat import S_ISDIR
@@ -21,7 +22,7 @@ from .ansi_parser import ANSIParser
 
 
 class TerminalPlugin:
-    def __init__(self, config, config_manager=None):
+    def __init__(self, config, config_manager=None, plugin_manager=None):
         self.config = config
         self._config_manager = config_manager
         self.name = config['name']
@@ -41,9 +42,10 @@ class TerminalPlugin:
 
 
 class TerminalEdit(QTextEdit):
-    """自定义终端编辑控件，用于拦截键盘事件"""
+    """自定义终端编辑控件，用于拦截键盘事件和输入法输入"""
 
     key_pressed = pyqtSignal(QKeyEvent)
+    input_method_text = pyqtSignal(str)
 
     def __init__(self, color_scheme=None, parent=None):
         super().__init__(parent)
@@ -71,6 +73,21 @@ class TerminalEdit(QTextEdit):
         """拦截所有键盘事件并发送给父组件处理"""
         self.key_pressed.emit(event)
         event.accept()
+    
+    def event(self, event):
+        """拦截Tab键事件，防止焦点切换"""
+        if event.type() == event.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Tab:
+                self.key_pressed.emit(event)
+                return True
+        return super().event(event)
+    
+    def inputMethodEvent(self, event):
+        """处理输入法输入事件（中文输入）"""
+        text = event.commitString()
+        if text:
+            self.input_method_text.emit(text)
+        super().inputMethodEvent(event)
 
 
 class SessionTab(QWidget):
@@ -103,6 +120,7 @@ class SessionTab(QWidget):
         self.terminal_display = TerminalEdit(self._color_scheme)
         self.terminal_display.setFont(QFont("Consolas", 11))
         self.terminal_display.key_pressed.connect(self.handle_key_press)
+        self.terminal_display.input_method_text.connect(self.handle_input_method_text)
         self.terminal_display.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {bg};
@@ -226,7 +244,10 @@ class SessionTab(QWidget):
         i = 0
         while i < len(text):
             if text[i] == '\r':
+                # 回车：移动到行首并删除到行尾的所有内容（用于Tab补全等场景）
                 cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+                cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
                 i += 1
             elif text[i] == '\b':
                 # 退格：删除前一个字符
@@ -298,9 +319,10 @@ class SessionTab(QWidget):
         last_esc = self._output_buffer.rfind('\x1b')
         if last_esc != -1:
             after_esc = self._output_buffer[last_esc:]
-            # 如果 after_esc 是不完整的ANSI序列（以 \x1b[ 开头，但没有以 m 或 K 结尾）
+            # 如果 after_esc 是不完整的ANSI序列（以 \x1b[ 开头）
             if len(after_esc) >= 2 and after_esc[1] == '[':
-                if not re.search(r'[mK\x07]$', after_esc):
+                # ANSI CSI序列可能的结尾字符
+                if not re.search(r'[mHKABCDsufrJLMXP@Zc]|n$', after_esc):
                     complete_part = self._output_buffer[:last_esc]
                     self._output_buffer = after_esc
                     if complete_part:
@@ -338,6 +360,24 @@ class SessionTab(QWidget):
                 strategy.send_raw("\x03")  # ETX (Ctrl+C)
             return
 
+        # Ctrl+D - 发送EOF
+        if key == Qt.Key.Key_D and modifiers == Qt.KeyboardModifier.ControlModifier:
+            if has_raw:
+                strategy.send_raw("\x04")  # EOT (Ctrl+D)
+            return
+
+        # Ctrl+Z - 挂起进程
+        if key == Qt.Key.Key_Z and modifiers == Qt.KeyboardModifier.ControlModifier:
+            if has_raw:
+                strategy.send_raw("\x1a")  # SUB (Ctrl+Z)
+            return
+
+        # Ctrl+L - 清屏
+        if key == Qt.Key.Key_L and modifiers == Qt.KeyboardModifier.ControlModifier:
+            if has_raw:
+                strategy.send_raw("\x0c")  # FF (Ctrl+L)
+            return
+
         # 方向键
         if key == Qt.Key.Key_Up:
             if has_raw:
@@ -366,6 +406,16 @@ class SessionTab(QWidget):
         elif key == Qt.Key.Key_End:
             if has_raw:
                 strategy.send_raw("\x1b[F")  # ANSI End
+            return
+
+        # Page Up / Page Down
+        if key == Qt.Key.Key_PageUp:
+            if has_raw:
+                strategy.send_raw("\x1b[5~")  # ANSI PageUp
+            return
+        elif key == Qt.Key.Key_PageDown:
+            if has_raw:
+                strategy.send_raw("\x1b[6~")  # ANSI PageDown
             return
 
         # Tab
@@ -398,7 +448,8 @@ class SessionTab(QWidget):
             if has_raw:
                 if len(self.current_input) > 0:
                     self.current_input = self.current_input[:-1]
-                strategy.send_raw("\x7f")  # DEL 键 (大多数SSH服务器期望的退格)
+                # 发送退格键（DEL \x7f）
+                strategy.send_raw("\x7f")
             elif len(self.current_input) > 0:
                 self.current_input = self.current_input[:-1]
                 self.redraw_input_line()
@@ -408,8 +459,8 @@ class SessionTab(QWidget):
                 strategy.send_raw("\x1b[3~")  # ANSI Delete
             return
 
-        # 普通字符
-        if text and len(text) == 1 and text.isprintable():
+        # 普通字符 - 包括特殊符号如 - = 等
+        if text:
             if has_raw:
                 # 交互模式：直接发送到远程，不在本地显示
                 self.current_input += text
@@ -418,6 +469,21 @@ class SessionTab(QWidget):
                 # 非交互模式：本地显示
                 self.current_input += text
                 self.write_output(text, "#ffffff")
+
+    def handle_input_method_text(self, text):
+        """处理输入法输入的文本（如中文）"""
+        if not self.connection_context.is_connected():
+            return
+
+        strategy = self.connection_context._strategy
+        has_raw = hasattr(strategy, 'send_raw') and self.interactive_mode
+
+        if has_raw:
+            self.current_input += text
+            strategy.send_raw(text)
+        else:
+            self.current_input += text
+            self.write_output(text, "#ffffff")
 
     def navigate_history(self, direction):
         """导航命令历史（交互模式）"""
@@ -485,6 +551,10 @@ class SessionTab(QWidget):
 
         self.current_connection = conn
         self.session_name = conn.get('name', '会话')
+
+        # 先断开现有连接
+        if self.connection_context.is_connected():
+            self.disconnect()
 
         self.terminal_display.clear()
         self.write_output(f"正在连接 {conn.get('name', '')} ({conn_type})...\n", "#ffff00")
@@ -765,6 +835,56 @@ class TerminalWidget(QWidget):
         """)
         sidebar_layout.addWidget(self.refresh_btn)
 
+        self.font_size_btn = QPushButton("字体大小")
+        self.font_size_btn.setFixedHeight(32)
+        self.font_size_btn.clicked.connect(self.show_font_size_menu)
+        self.font_size_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
+                padding: 6px;
+                font-size: {font_size};
+                font-weight: 500;
+                border-radius: {border_radius};
+            }}
+            QPushButton:hover {{
+                background-color: {bg_input_focus};
+                border-color: {border_focus};
+            }}
+            QPushButton:pressed {{
+                background-color: {bg_tertiary};
+            }}
+        """)
+        sidebar_layout.addWidget(self.font_size_btn)
+
+        self.current_font_size = 11
+
+        self.color_enable_btn = QPushButton("颜色显示")
+        self.color_enable_btn.setFixedHeight(32)
+        self.color_enable_btn.clicked.connect(self.toggle_color_display)
+        self.color_enable_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
+                padding: 6px;
+                font-size: {font_size};
+                font-weight: 500;
+                border-radius: {border_radius};
+            }}
+            QPushButton:hover {{
+                background-color: {bg_input_focus};
+                border-color: {border_focus};
+            }}
+            QPushButton:pressed {{
+                background-color: {bg_tertiary};
+            }}
+        """)
+        sidebar_layout.addWidget(self.color_enable_btn)
+
+        self.color_enabled = True
+
         self.right_panel = QWidget()
         right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -884,6 +1004,9 @@ class TerminalWidget(QWidget):
         # 创建会话标签
         tab = SessionTab(session_id, conn.get('name', '会话'), self._color_scheme)
         
+        # 设置初始字体大小
+        tab.terminal_display.setFont(QFont("Consolas", self.current_font_size))
+        
         # 标签只显示名称，没有名称则显示IP
         conn_name = conn.get('name', '')
         if not conn_name:
@@ -993,6 +1116,51 @@ class TerminalWidget(QWidget):
             session.connect_with_config(session.current_connection)
         else:
             QMessageBox.information(self, "提示", "没有可重新连接的会话")
+
+    def show_font_size_menu(self):
+        """显示字体大小设置菜单"""
+        menu = QMenu(self)
+        
+        font_sizes = [
+            ("8px", 8),
+            ("10px", 10),
+            ("11px", 11),
+            ("12px", 12),
+            ("14px", 14),
+            ("16px", 16),
+            ("18px", 18),
+            ("20px", 20)
+        ]
+        
+        for label, size in font_sizes:
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(self.current_font_size == size)
+            action.triggered.connect(lambda checked, s=size: self.set_font_size(s))
+            menu.addAction(action)
+        
+        menu.exec(self.font_size_btn.mapToGlobal(self.font_size_btn.rect().bottomLeft()))
+
+    def set_font_size(self, size):
+        """设置字体大小"""
+        self.current_font_size = size
+        for session_id, session_data in self.sessions.items():
+            session = session_data.get('tab')
+            if session and hasattr(session, 'terminal_display'):
+                session.terminal_display.setFont(QFont("Consolas", size))
+
+    def toggle_color_display(self):
+        """切换颜色显示开关"""
+        self.color_enabled = not self.color_enabled
+        self.color_enable_btn.setText("颜色显示(关)" if not self.color_enabled else "颜色显示(开)")
+        
+        for session_id, session_data in self.sessions.items():
+            session = session_data.get('tab')
+            if session and hasattr(session, 'ansi_parser'):
+                session.ansi_parser.enable_color = self.color_enabled
+                # 如果关闭颜色，重置格式为默认
+                if not self.color_enabled:
+                    session.ansi_parser.reset_format()
 
     def show_connection_menu(self, pos):
         """显示连接右键菜单"""

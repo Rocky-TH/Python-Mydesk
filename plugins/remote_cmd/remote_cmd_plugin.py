@@ -9,7 +9,7 @@ from plugins.terminal.connection_factory import ConnectionFactory
 class RemoteCmdPlugin:
     """远程命令执行插件 - 无UI，用于远程连接设备执行命令并解析结果"""
 
-    def __init__(self, config, config_manager=None):
+    def __init__(self, config, config_manager=None, plugin_manager=None):
         self.config = config
         self._config_manager = config_manager
         self.name = config['name']

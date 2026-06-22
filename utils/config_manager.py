@@ -329,7 +329,18 @@ class ConfigManager:
     
     def get_font_size(self, key: str, default: str = '12px') -> str:
         """获取字体大小配置"""
-        return self._style_config.get('font_sizes', {}).get(key, default)
+        value = self._style_config.get('font_sizes', {}).get(key, default)
+        return self._validate_font_size(value, default)
+    
+    def _validate_font_size(self, value: str, default: str = '12px') -> str:
+        """验证字体大小值是否有效"""
+        if not value or not isinstance(value, str):
+            return default
+        import re
+        match = re.match(r'^(\d+)(px|pt|em)?$', value.strip())
+        if match and int(match.group(1)) > 0:
+            return value
+        return default
     
     def get_border_radius(self, key: str, default: str = '4px') -> str:
         """获取边框圆角配置"""
@@ -340,9 +351,12 @@ class ConfigManager:
         return self._style_config.get('components', {}).get(component_name, {})
     
     def get_component_style_value(self, component_name: str, key: str, default: Any = None) -> Any:
-        """获取指定组件的样式值"""
+        """获取指定组件的样式值（自动解析变量引用）"""
         component = self.get_component_style(component_name)
-        return component.get(key, default)
+        value = component.get(key, default)
+        if isinstance(value, str):
+            return self.resolve_style_value(value)
+        return value
     
     def resolve_style_value(self, value: str) -> str:
         """解析样式值中的变量引用，如 ${color_scheme.primary}"""

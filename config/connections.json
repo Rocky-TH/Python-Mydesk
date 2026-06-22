@@ -12,5 +12,19 @@
         "created_at": "2026-06-18T00:44:09.628477",
         "updated_at": "2026-06-18T00:44:09.628511",
         "id": "a78451c1"
+    },
+    {
+        "name": "sdf",
+        "type": "ssh",
+        "config": {
+            "host": "tty.sdf.org",
+            "port": 22,
+            "username": "zhang163",
+            "password": "zhang163",
+            "key_file": ""
+        },
+        "created_at": "2026-06-21T17:52:31.821011",
+        "updated_at": "2026-06-21T17:52:48.017220",
+        "id": "6652649d"
     }
 ]

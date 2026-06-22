@@ -37,9 +37,9 @@ class PluginManager:
 
         # Instantiate plugin with config and config_manager
         if self._config_manager:
-            plugin_instance = plugin_class(config, self._config_manager)
+            plugin_instance = plugin_class(config, self._config_manager, self)
         else:
-            plugin_instance = plugin_class(config)
+            plugin_instance = plugin_class(config, None, self)
 
         self.plugins[name] = plugin_instance
         self.plugin_configs[name] = config

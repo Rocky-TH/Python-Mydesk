@@ -121,8 +121,12 @@ class SSHConnection(ConnectionBase):
         """发送原始数据到shell（用于交互式终端）"""
         if self.connected and self.shell:
             try:
+                # 确保数据被完整发送
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
                 self.shell.send(data)
-            except:
+            except Exception as e:
+                print(f"发送数据失败: {e}")
                 pass
 
     def read_output(self, timeout=0.05):

@@ -1,10 +1,15 @@
 import sys
+import warnings
 from PyQt6.QtWidgets import QApplication
 from core.main_window import MainWindow
 from core.plugin_manager import PluginManager
 
 
 def main():
+    # 抑制第三方库的弃用警告
+    warnings.filterwarnings('ignore', category=DeprecationWarning, module='paramiko')
+    warnings.filterwarnings('ignore', category=DeprecationWarning, module='cryptography')
+    
     app = QApplication(sys.argv)
     app.setApplicationName("MyDesk")
     app.setOrganizationName("MyDesk")
