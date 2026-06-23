@@ -1,0 +1,183 @@
+{
+    "name": "深色主题",
+    "description": "适合夜间使用的深色主题",
+    "is_dark": true,
+    
+    "colors": {
+        "primary": "#007acc",
+        "primary-hover": "#005a9e",
+        "primary-pressed": "#004575",
+        
+        "success": "#28a745",
+        "warning": "#ffc107",
+        "danger": "#dc3545",
+        "info": "#17a2b8",
+        
+        "bg-main": "#1e1e1e",
+        "bg-secondary": "#252526",
+        "bg-tertiary": "#2d2d30",
+        "bg-input": "#3c3c3c",
+        "bg-input-focus": "#4c4c4c",
+        
+        "border": "#3d3d40",
+        "border-light": "#4a4a4d",
+        "border-focus": "#007acc",
+        
+        "text": "#ffffff",
+        "text-secondary": "#cccccc",
+        "text-hint": "#888888",
+        "text-success": "#00ff00",
+        "text-warning": "#ffff00",
+        "text-danger": "#ff6b6b",
+        "text-info": "#00d4ff",
+        
+        "selection": "#007acc",
+        "selection-text": "#ffffff"
+    },
+    
+    "fonts": {
+        "size-sm": "11px",
+        "size-md": "12px",
+        "size-lg": "13px",
+        "size-xl": "14px",
+        "size-xxl": "16px",
+        "weight-normal": "500",
+        "weight-bold": "bold"
+    },
+    
+    "radius": {
+        "sm": "4px",
+        "md": "6px",
+        "lg": "8px",
+        "xl": "12px"
+    },
+    
+    "components": {
+        "button": {
+            "bg": "@primary",
+            "color": "@text",
+            "border": "none",
+            "padding": "8px 16px",
+            "radius": "@radius.md",
+            "font-size": "@fonts.size-md",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@primary-hover",
+            "pressed-bg": "@primary-pressed"
+        },
+        
+        "button-secondary": {
+            "bg": "@bg-input",
+            "color": "@text",
+            "border": "1px solid @border-light",
+            "padding": "8px 16px",
+            "radius": "@radius.md",
+            "font-size": "@fonts.size-md",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@bg-input-focus",
+            "hover-border": "@border-focus",
+            "pressed-bg": "@bg-tertiary"
+        },
+        
+        "input": {
+            "bg": "@bg-input",
+            "color": "@text",
+            "border": "1px solid @border-light",
+            "padding": "6px 10px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-md",
+            "focus-bg": "@bg-input-focus",
+            "focus-border": "@border-focus"
+        },
+        
+        "combo-box": {
+            "bg": "@bg-input",
+            "color": "@text",
+            "border": "1px solid @border-light",
+            "padding": "6px 10px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-md",
+            "popup-bg": "@bg-tertiary",
+            "popup-color": "@text",
+            "popup-selection-bg": "@selection",
+            "popup-selection-color": "@selection-text"
+        },
+        
+        "text-edit": {
+            "bg": "@bg-main",
+            "color": "@text",
+            "border": "1px solid @border",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-family": "Consolas",
+            "font-size": "@fonts.size-md"
+        },
+        
+        "label": {
+            "color": "@text",
+            "font-size": "@fonts.size-md"
+        },
+        
+        "label-secondary": {
+            "color": "@text-secondary",
+            "font-size": "@fonts.size-sm"
+        },
+        
+        "menu": {
+            "bg": "@bg-tertiary",
+            "color": "@text",
+            "border": "1px solid @border-light",
+            "radius": "@radius.md",
+            "padding": "4px",
+            "item-padding": "6px 24px",
+            "item-selected-bg": "@primary",
+            "item-selected-color": "@text",
+            "separator-bg": "@border-light",
+            "separator-height": "1px"
+        },
+        
+        "tab": {
+            "bg": "@bg-tertiary",
+            "color": "@text-secondary",
+            "selected-bg": "@primary",
+            "selected-color": "@text",
+            "hover-bg": "@bg-input",
+            "hover-color": "@text",
+            "border": "@border",
+            "padding": "10px 24px",
+            "font-size": "@fonts.size-md",
+            "radius": "@radius.md"
+        },
+        
+        "list": {
+            "bg": "@bg-main",
+            "color": "@text",
+            "border": "1px solid @border",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-md",
+            "item-selected-bg": "@selection",
+            "item-selected-color": "@selection-text",
+            "item-hover-bg": "@bg-tertiary"
+        },
+        
+        "group-box": {
+            "color": "@text",
+            "border": "2px solid @border-light",
+            "radius": "@radius.lg",
+            "bg": "@bg-secondary",
+            "font-size": "@fonts.size-md",
+            "font-weight": "@fonts.weight-bold"
+        },
+        
+        "dialog": {
+            "bg": "@bg-secondary",
+            "color": "@text"
+        },
+        
+        "scroll-bar": {
+            "bg": "@bg-tertiary",
+            "handle-bg": "@border-light",
+            "handle-hover-bg": "@primary",
+            "handle-radius": "@radius.sm"
+        }
+    }
+}

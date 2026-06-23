@@ -5,9 +5,22 @@ from PyQt6.QtWidgets import (
     QMenuBar, QMenu, QStatusBar, QLabel,
     QToolBar, QTabWidget, QMessageBox
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction
 from utils.config_manager import ConfigManager
+
+
+class ThemeSwitchWorker(QThread):
+    theme_switched = pyqtSignal(bool)
+    
+    def __init__(self, config_manager, theme_id):
+        super().__init__()
+        self._config_manager = config_manager
+        self._theme_id = theme_id
+    
+    def run(self):
+        success = self._config_manager.set_current_theme(self._theme_id)
+        self.theme_switched.emit(success)
 
 
 class MainWindow(QMainWindow):
@@ -20,13 +33,36 @@ class MainWindow(QMainWindow):
         self._color_scheme = self.config_manager.get_color_scheme()
         self.plugin_widgets = {}
         self.current_plugin_name = None
+        self._theme_worker = None
 
         self.init_ui()
         self.load_plugins()
     
     def _get_style(self, key, default=None):
-        """获取样式配置"""
-        return self._color_scheme.get(key, default)
+        """获取样式配置（支持新旧两种格式）"""
+        value = self._color_scheme.get(key)
+        if value is not None:
+            return value
+        old_key_map = {
+            'background_main': 'bg-main',
+            'background_secondary': 'bg-secondary',
+            'background_tertiary': 'bg-tertiary',
+            'background_input': 'bg-input',
+            'background_input_focus': 'bg-input-focus',
+            'text_primary': 'text',
+            'text_secondary': 'text-secondary',
+            'border_light': 'border-light',
+            'border_focus': 'border-focus',
+            'selection_text': 'selection-text',
+            'primary_hover': 'primary-hover',
+            'primary_pressed': 'primary-pressed',
+            'success_hover': 'success-hover',
+            'text_success': 'text-success',
+            'text_danger': 'text-danger'
+        }
+        if key in old_key_map:
+            return self._color_scheme.get(old_key_map[key], default)
+        return default
     
     def _get_font_size(self, key, default='12px'):
         """获取字体大小"""
@@ -40,19 +76,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MyDesk - 终端管理器")
         self.setGeometry(100, 100, 1200, 800)
 
-        bg_main = self._get_style('background_main', '#1e1e1e')
-        bg_tertiary = self._get_style('background_tertiary', '#2d2d30')
-        bg_input = self._get_style('background_input', '#3c3c3c')
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
         border = self._get_style('border', '#3c3c3c')
-        border_light = self._get_style('border_light', '#5a5a5d')
-        text_primary = self._get_style('text_primary', '#ffffff')
-        text_secondary = self._get_style('text_secondary', '#cccccc')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        text_primary = self._get_style('text', '#ffffff')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
         primary = self._get_style('primary', '#007acc')
         selection = self._get_style('selection', '#007acc')
-        font_size_medium = self._get_font_size('medium', '13px')
-        font_size_normal = self._get_font_size('normal', '12px')
-        border_radius_small = self._get_border_radius('small', '4px')
-        border_radius_normal = self._get_border_radius('normal', '6px')
+        font_size_medium = self._get_font_size('size-lg', '13px')
+        font_size_normal = self._get_font_size('size-md', '12px')
+        border_radius_small = self._get_border_radius('sm', '4px')
+        border_radius_normal = self._get_border_radius('md', '6px')
 
         self.setStyleSheet(f"""
             QMainWindow {{
@@ -147,13 +183,13 @@ class MainWindow(QMainWindow):
 
     def create_menu_bar(self):
         menubar = self.menuBar()
-        bg_tertiary = self._get_style('background_tertiary', '#2d2d30')
-        text_primary = self._get_style('text_primary', '#ffffff')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        text_primary = self._get_style('text', '#ffffff')
         border = self._get_style('border', '#3c3c3c')
-        border_light = self._get_style('border_light', '#5a5a5d')
+        border_light = self._get_style('border-light', '#5a5a5d')
         primary = self._get_style('primary', '#007acc')
-        border_radius_small = self._get_border_radius('small', '4px')
-        border_radius_normal = self._get_border_radius('normal', '6px')
+        border_radius_small = self._get_border_radius('sm', '4px')
+        border_radius_normal = self._get_border_radius('md', '6px')
         
         menubar.setStyleSheet(f"""
             QMenuBar {{
@@ -196,8 +232,29 @@ class MainWindow(QMainWindow):
 
         self.file_menu.addSeparator()
 
-        settings_action = QAction("设置", self)
-        self.file_menu.addAction(settings_action)
+        # 设置菜单
+        settings_menu = QMenu("设置", self)
+        self.file_menu.addMenu(settings_menu)
+
+        # 主题设置子菜单
+        self.theme_menu = QMenu("主题", self)
+        settings_menu.addMenu(self.theme_menu)
+        self._theme_actions = {}
+        
+        # 获取可用主题列表
+        themes = self.config_manager.get_theme_list()
+        current_theme = self.config_manager.get_current_theme()
+        
+        # 添加主题选项
+        for theme_info in themes:
+            theme_action = QAction(theme_info['name'], self)
+            theme_action.setCheckable(True)
+            theme_action.setChecked(theme_info['id'] == current_theme)
+            theme_action.triggered.connect(
+                lambda checked, tid=theme_info['id']: self.change_theme(tid)
+            )
+            self.theme_menu.addAction(theme_action)
+            self._theme_actions[theme_info['id']] = theme_action
 
         self.file_menu.addSeparator()
 
@@ -225,13 +282,13 @@ class MainWindow(QMainWindow):
         self.toolbar = QToolBar("主工具栏")
         self.toolbar.setMovable(False)
         
-        bg_tertiary = self._get_style('background_tertiary', '#2d2d30')
-        bg_input = self._get_style('background_input', '#3c3c3c')
-        border_light = self._get_style('border_light', '#5a5a5d')
-        text_primary = self._get_style('text_primary', '#ffffff')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        text_primary = self._get_style('text', '#ffffff')
         primary = self._get_style('primary', '#007acc')
-        font_size_normal = self._get_font_size('normal', '12px')
-        border_radius_small = self._get_border_radius('small', '4px')
+        font_size_normal = self._get_font_size('size-md', '12px')
+        border_radius_small = self._get_border_radius('sm', '4px')
         
         self.toolbar.setStyleSheet(f"""
             QToolBar {{
@@ -283,7 +340,7 @@ class MainWindow(QMainWindow):
                 params = item.get("params", "")
 
                 action = QAction(label, self)
-                text_secondary = self._get_style('text_secondary', '#cccccc')
+                text_secondary = self._get_style('text-secondary', '#cccccc')
                 action.setStyleSheet(f"""
                     QAction {{
                         color: {text_secondary};
@@ -305,7 +362,7 @@ class MainWindow(QMainWindow):
     def create_status_bar(self):
         self.status_bar = QStatusBar()
         primary = self._get_style('primary', '#007acc')
-        text_primary = self._get_style('text_primary', '#ffffff')
+        text_primary = self._get_style('text', '#ffffff')
         self.status_bar.setStyleSheet(f"""
             QStatusBar {{
                 background-color: {primary};
@@ -413,6 +470,34 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
 
+    def change_theme(self, theme_id):
+        """异步切换主题"""
+        if self._theme_worker and self._theme_worker.isRunning():
+            return
+        
+        self._theme_worker = ThemeSwitchWorker(self.config_manager, theme_id)
+        self._theme_worker.theme_switched.connect(
+            lambda success, tid=theme_id: self._on_theme_switched(success, tid)
+        )
+        self._theme_worker.start()
+    
+    def _on_theme_switched(self, success, theme_id):
+        """主题切换完成后的回调"""
+        if success:
+            QTimer.singleShot(0, lambda: self._update_theme_ui(theme_id))
+    
+    def _update_theme_ui(self, theme_id):
+        """更新主题UI（在主线程中执行）"""
+        self._color_scheme = self.config_manager.get_color_scheme()
+        
+        self.init_ui()
+        self.load_plugins()
+        
+        if hasattr(self, '_theme_actions'):
+            current_theme = self.config_manager.get_current_theme()
+            for tid, action in self._theme_actions.items():
+                action.setChecked(tid == current_theme)
+    
     def show_about(self):
         QMessageBox.about(
             self,

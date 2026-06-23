@@ -12,6 +12,7 @@ class ConfigManager:
         self._plugin_configs: Dict[str, Dict[str, Any]] = {}
         self._plugin_data: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._style_config: Dict[str, Any] = {}
+        self._themes: Dict[str, Dict[str, Any]] = {}
         
         if config_dir:
             self.load_all()
@@ -50,54 +51,52 @@ class ConfigManager:
                 self._style_config = self._get_default_style_config()
         else:
             self._style_config = self._get_default_style_config()
+        
+        # 加载主题目录下的所有主题
+        self._load_themes()
+    
+    def _load_themes(self) -> None:
+        """加载主题目录下的所有主题配置"""
+        self._themes = {}
+        theme_dir = self._style_config.get('theme_dir', 'theme')
+        theme_dir_path = os.path.join(self._config_dir, theme_dir)
+        
+        if not os.path.exists(theme_dir_path):
+            print(f"主题目录不存在: {theme_dir_path}")
+            return
+        
+        for filename in os.listdir(theme_dir_path):
+            if filename.endswith('.json'):
+                theme_path = os.path.join(theme_dir_path, filename)
+                try:
+                    with open(theme_path, 'r', encoding='utf-8') as f:
+                        theme_data = json.load(f)
+                        theme_name = filename[:-5]  # 移除 .json 后缀
+                        self._themes[theme_name] = theme_data
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"加载主题失败 {filename}: {e}")
+    
+    def get_available_themes(self) -> Dict[str, Dict[str, Any]]:
+        """获取所有可用的主题"""
+        return self._themes
+    
+    def get_theme_list(self) -> List[Dict[str, str]]:
+        """获取主题列表（名称和描述）"""
+        result = []
+        for theme_id, theme_data in self._themes.items():
+            result.append({
+                'id': theme_id,
+                'name': theme_data.get('name', theme_id),
+                'description': theme_data.get('description', '')
+            })
+        return result
     
     def _get_default_style_config(self) -> Dict[str, Any]:
         """获取默认样式配置"""
         return {
-            "color_scheme": {
-                "primary": "#007acc",
-                "primary_hover": "#005a9e",
-                "primary_pressed": "#004575",
-                "success": "#28a745",
-                "warning": "#ffc107",
-                "danger": "#dc3545",
-                "info": "#17a2b8",
-                "background_main": "#1e1e1e",
-                "background_secondary": "#252526",
-                "background_tertiary": "#2d2d30",
-                "background_input": "#3c3c3c",
-                "background_input_focus": "#4c4c4c",
-                "border": "#3d3d40",
-                "border_light": "#4a4a4d",
-                "border_focus": "#007acc",
-                "text_primary": "#ffffff",
-                "text_secondary": "#cccccc",
-                "text_hint": "#888888",
-                "text_success": "#00ff00",
-                "text_warning": "#ffff00",
-                "text_danger": "#ff6b6b",
-                "text_info": "#00d4ff",
-                "selection": "#007acc",
-                "selection_text": "#ffffff"
-            },
-            "font_sizes": {
-                "small": "11px",
-                "normal": "12px",
-                "medium": "13px",
-                "large": "14px",
-                "extra_large": "16px"
-            },
-            "font_weights": {
-                "normal": "500",
-                "bold": "bold"
-            },
-            "border_radius": {
-                "small": "4px",
-                "normal": "6px",
-                "large": "8px",
-                "extra_large": "12px"
-            },
-            "components": {}
+            "version": "2.0.0",
+            "current_theme": "dark",
+            "theme_dir": "theme"
         }
 
     def _load_all_plugin_configs(self) -> None:
@@ -319,18 +318,149 @@ class ConfigManager:
         """获取完整的样式配置"""
         return self._style_config
     
+    def get_current_theme(self) -> str:
+        """获取当前主题名称"""
+        return self._style_config.get('current_theme', 'dark')
+    
+    def set_current_theme(self, theme_id: str) -> bool:
+        """设置当前主题"""
+        if theme_id not in self._themes:
+            print(f"主题不存在: {theme_id}")
+            return False
+        self._style_config['current_theme'] = theme_id
+        self.save_style_config()
+        return True
+    
+    def save_style_config(self) -> bool:
+        """保存样式配置"""
+        if not self._config_dir:
+            return False
+        style_config_path = os.path.join(self._config_dir, 'style_config.json')
+        try:
+            with open(style_config_path, 'w', encoding='utf-8') as f:
+                json.dump(self._style_config, f, indent=4, ensure_ascii=False)
+            return True
+        except IOError as e:
+            print(f"保存样式配置失败: {e}")
+            return False
+    
+    def get_current_theme_config(self) -> Dict[str, Any]:
+        """获取当前主题的完整配置"""
+        current_theme = self.get_current_theme()
+        if current_theme in self._themes:
+            return self._themes[current_theme]
+        # 如果找不到当前主题，返回第一个可用主题
+        if self._themes:
+            return next(iter(self._themes.values()))
+        # 返回默认深色主题配置
+        return {
+            "name": "深色主题",
+            "description": "默认深色主题",
+            "is_dark": True,
+            "colors": {
+                "primary": "#007acc",
+                "primary-hover": "#005a9e",
+                "primary-pressed": "#004575",
+                "success": "#28a745",
+                "warning": "#ffc107",
+                "danger": "#dc3545",
+                "info": "#17a2b8",
+                "bg-main": "#1e1e1e",
+                "bg-secondary": "#252526",
+                "bg-tertiary": "#2d2d30",
+                "bg-input": "#3c3c3c",
+                "bg-input-focus": "#4c4c4c",
+                "border": "#3d3d40",
+                "border-light": "#4a4a4d",
+                "border-focus": "#007acc",
+                "text": "#ffffff",
+                "text-secondary": "#cccccc",
+                "text-hint": "#888888",
+                "text-success": "#00ff00",
+                "text-warning": "#ffff00",
+                "text-danger": "#ff6b6b",
+                "text-info": "#00d4ff",
+                "selection": "#007acc",
+                "selection-text": "#ffffff"
+            },
+            "fonts": {
+                "size-sm": "11px",
+                "size-md": "12px",
+                "size-lg": "13px",
+                "size-xl": "14px",
+                "size-xxl": "16px",
+                "weight-normal": "500",
+                "weight-bold": "bold"
+            },
+            "radius": {
+                "sm": "4px",
+                "md": "6px",
+                "lg": "8px",
+                "xl": "12px"
+            },
+            "components": {}
+        }
+    
     def get_color_scheme(self) -> Dict[str, Any]:
-        """获取颜色方案配置"""
-        return self._style_config.get('color_scheme', {})
+        """获取颜色方案配置（兼容旧接口）"""
+        return self.get_current_theme_config().get('colors', {})
     
     def get_color(self, key: str, default: str = '#ffffff') -> str:
-        """获取单个颜色值"""
-        return self.get_color_scheme().get(key, default)
+        """获取单个颜色值（支持新格式和旧格式）"""
+        colors = self.get_color_scheme()
+        
+        # 新格式 key
+        if key in colors:
+            return colors[key]
+        
+        # 旧格式兼容
+        old_key_map = {
+            'background_main': 'bg-main',
+            'background_secondary': 'bg-secondary',
+            'background_tertiary': 'bg-tertiary',
+            'background_input': 'bg-input',
+            'background_input_focus': 'bg-input-focus',
+            'text_primary': 'text',
+            'text_secondary': 'text-secondary',
+            'text_hint': 'text-hint',
+            'text_success': 'text-success',
+            'text_warning': 'text-warning',
+            'text_danger': 'text-danger',
+            'text_info': 'text-info',
+            'border_light': 'border-light',
+            'border_focus': 'border-focus',
+            'selection_text': 'selection-text',
+            'primary_hover': 'primary-hover',
+            'primary_pressed': 'primary-pressed'
+        }
+        
+        if key in old_key_map:
+            return colors.get(old_key_map[key], default)
+        
+        return default
     
     def get_font_size(self, key: str, default: str = '12px') -> str:
-        """获取字体大小配置"""
-        value = self._style_config.get('font_sizes', {}).get(key, default)
-        return self._validate_font_size(value, default)
+        """获取字体大小配置（支持新格式和旧格式）"""
+        fonts = self.get_current_theme_config().get('fonts', {})
+        
+        # 新格式 key
+        if key in fonts:
+            return self._validate_font_size(fonts[key], default)
+        
+        # 旧格式兼容
+        old_key_map = {
+            'small': 'size-sm',
+            'normal': 'size-md',
+            'medium': 'size-lg',
+            'large': 'size-xl',
+            'extra_large': 'size-xxl'
+        }
+        
+        if key in old_key_map:
+            value = fonts.get(old_key_map[key], default)
+            return self._validate_font_size(value, default)
+        
+        return self._validate_font_size(default, default)
     
     def _validate_font_size(self, value: str, default: str = '12px') -> str:
         """验证字体大小值是否有效"""
@@ -343,12 +473,30 @@ class ConfigManager:
         return default
     
     def get_border_radius(self, key: str, default: str = '4px') -> str:
-        """获取边框圆角配置"""
-        return self._style_config.get('border_radius', {}).get(key, default)
+        """获取边框圆角配置（支持新格式和旧格式）"""
+        radius = self.get_current_theme_config().get('radius', {})
+        
+        # 新格式 key
+        if key in radius:
+            return radius[key]
+        
+        # 旧格式兼容
+        old_key_map = {
+            'small': 'sm',
+            'normal': 'md',
+            'large': 'lg',
+            'extra_large': 'xl'
+        }
+        
+        if key in old_key_map:
+            return radius.get(old_key_map[key], default)
+        
+        return default
     
     def get_component_style(self, component_name: str) -> Dict[str, Any]:
         """获取指定组件的样式配置"""
-        return self._style_config.get('components', {}).get(component_name, {})
+        components = self.get_current_theme_config().get('components', {})
+        return components.get(component_name, {})
     
     def get_component_style_value(self, component_name: str, key: str, default: Any = None) -> Any:
         """获取指定组件的样式值（自动解析变量引用）"""
@@ -359,8 +507,28 @@ class ConfigManager:
         return value
     
     def resolve_style_value(self, value: str) -> str:
-        """解析样式值中的变量引用，如 ${color_scheme.primary}"""
-        if isinstance(value, str) and '${' in value and '}' in value:
+        """解析样式值中的变量引用，支持两种格式：${xxx} 和 @xxx"""
+        if not isinstance(value, str):
+            return str(value) if value is not None else ''
+        
+        # 先处理 @xxx 格式（新格式）
+        if '@' in value:
+            parts = value.split('@')
+            result = parts[0]
+            for part in parts[1:]:
+                if ' ' in part or '\t' in part or ';' in part or ':' in part:
+                    # 变量后面有分隔符
+                    var_name = part.split()[0].split(';')[0].split(':')[0]
+                    rest = part[len(var_name):]
+                    var_value = self._get_variable_value(var_name)
+                    result += var_value + rest
+                else:
+                    var_value = self._get_variable_value(part)
+                    result += var_value
+            value = result
+        
+        # 处理 ${xxx} 格式（旧格式兼容）
+        if '${' in value and '}' in value:
             parts = value.split('${')
             result = parts[0]
             for part in parts[1:]:
@@ -371,18 +539,49 @@ class ConfigManager:
                 else:
                     result += '${' + part
             return result
+        
         return value
     
     def _get_variable_value(self, var_path: str) -> str:
-        """获取变量路径对应的值"""
+        """获取变量路径对应的值（支持新格式和旧格式）"""
+        theme_config = self.get_current_theme_config()
+        
+        # 新格式：@primary, @bg-main, @fonts.size-md
         path_parts = var_path.split('.')
-        value = self._style_config
-        for part in path_parts:
-            if isinstance(value, dict) and part in value:
-                value = value[part]
-            else:
-                return var_path
-        return str(value) if value is not None else var_path
+        if len(path_parts) == 1:
+            # 单个 key，先检查 colors
+            if path_parts[0] in theme_config.get('colors', {}):
+                return theme_config['colors'][path_parts[0]]
+            # 检查 fonts
+            if path_parts[0] in theme_config.get('fonts', {}):
+                return theme_config['fonts'][path_parts[0]]
+            # 检查 radius
+            if path_parts[0] in theme_config.get('radius', {}):
+                return theme_config['radius'][path_parts[0]]
+        elif len(path_parts) == 2:
+            # 两个部分：fonts.size-md, radius.sm
+            category, key = path_parts
+            if category == 'colors' and key in theme_config.get('colors', {}):
+                return theme_config['colors'][key]
+            elif category == 'fonts' and key in theme_config.get('fonts', {}):
+                return theme_config['fonts'][key]
+            elif category == 'radius' and key in theme_config.get('radius', {}):
+                return theme_config['radius'][key]
+        
+        # 旧格式兼容：color_scheme.primary, font_sizes.medium
+        if len(path_parts) >= 2:
+            category = path_parts[0]
+            key_parts = path_parts[1:]
+            key = '.'.join(key_parts)
+            
+            if category == 'color_scheme':
+                return self.get_color(key, var_path)
+            elif category == 'font_sizes':
+                return self.get_font_size(key, var_path)
+            elif category == 'border_radius':
+                return self.get_border_radius(key, var_path)
+        
+        return var_path
 
     @staticmethod
     def get_default_config_dir() -> str:

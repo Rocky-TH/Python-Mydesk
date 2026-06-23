@@ -54,9 +54,9 @@ class TerminalEdit(QTextEdit):
         self.set_style()
     
     def set_style(self):
-        bg = self._color_scheme.get('background_main', '#1e1e1e')
-        text_color = self._color_scheme.get('text_primary', '#ffffff')
-        border_focus = self._color_scheme.get('border_focus', '#007acc')
+        bg = self._color_scheme.get('bg-main', self._color_scheme.get('background_main', '#1e1e1e'))
+        text_color = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
+        border_focus = self._color_scheme.get('border-focus', self._color_scheme.get('border_focus', '#007acc'))
         
         self.setStyleSheet(f"""
             QTextEdit {{
@@ -87,7 +87,7 @@ class TerminalEdit(QTextEdit):
         text = event.commitString()
         if text:
             self.input_method_text.emit(text)
-        super().inputMethodEvent(event)
+        # 不调用super，避免文本被默认处理插入两次
 
 
 class SessionTab(QWidget):
@@ -112,10 +112,10 @@ class SessionTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        bg = self._color_scheme.get('background_main', '#1e1e1e')
-        text_color = self._color_scheme.get('text_primary', '#ffffff')
+        bg = self._color_scheme.get('bg-main', self._color_scheme.get('background_main', '#1e1e1e'))
+        text_color = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
         border = self._color_scheme.get('border', '#3c3c3c')
-        border_focus = self._color_scheme.get('border_focus', '#007acc')
+        border_focus = self._color_scheme.get('border-focus', self._color_scheme.get('border_focus', '#007acc'))
         
         self.terminal_display = TerminalEdit(self._color_scheme)
         self.terminal_display.setFont(QFont("Consolas", 11))
@@ -136,7 +136,7 @@ class SessionTab(QWidget):
         layout.addWidget(self.terminal_display)
 
         primary = self._color_scheme.get('primary', '#007acc')
-        primary_hover = self._color_scheme.get('primary_hover', '#005a9e')
+        primary_hover = self._color_scheme.get('primary-hover', self._color_scheme.get('primary_hover', '#005a9e'))
         
         self.status_bar = QWidget()
         self.status_bar.setFixedHeight(28)
@@ -149,7 +149,7 @@ class SessionTab(QWidget):
         status_layout = QHBoxLayout(self.status_bar)
         status_layout.setContentsMargins(12, 0, 12, 0)
 
-        text_primary = self._color_scheme.get('text_primary', '#ffffff')
+        text_primary = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
         
         self.status_label = QLabel("未连接")
         self.status_label.setStyleSheet(f"color: {text_primary}; font-weight: bold; font-size: 12px;")
@@ -224,6 +224,39 @@ class SessionTab(QWidget):
         # 仅在需要时滚动，减少频繁调用
         if self._should_scroll():
             self.terminal_display.ensureCursorVisible()
+
+        # 更新current_input：提取最后一行中提示符后的内容
+        self._update_current_input_from_display()
+
+    def _update_current_input_from_display(self):
+        """从显示内容中更新current_input（处理Tab补全等场景）"""
+        plain_text = self.terminal_display.toPlainText()
+        lines = plain_text.split('\n')
+        if not lines:
+            return
+        
+        last_line = lines[-1]
+        
+        # 查找提示符位置（常见提示符：# $ > %）
+        prompt_patterns = [r'^\s*[\w@]+[\s]*[:][\s]*[\w/~.-]*\s*[#$>%]\s*', r'^\s*[#$>%]\s*']
+        
+        for pattern in prompt_patterns:
+            import re
+            match = re.match(pattern, last_line)
+            if match:
+                self.current_input = last_line[match.end():]
+                return
+        
+        # 如果没有找到提示符，保留当前输入
+        if last_line.strip():
+            # 检查是否有之前的行可能包含提示符
+            for i in range(len(lines)-1, max(0, len(lines)-5), -1):
+                line = lines[i]
+                for pattern in prompt_patterns:
+                    match = re.match(pattern, line)
+                    if match:
+                        self.current_input = last_line
+                        return
 
     def _should_scroll(self):
         """判断是否需要滚动到可见区域"""
@@ -636,7 +669,7 @@ class TerminalWidget(QWidget):
         return {}
     
     def _get_style(self, key, default=None):
-        """获取样式配置"""
+        """获取样式配置（支持新旧两种格式）"""
         if self._config_manager:
             return self._config_manager.get_color(key, default)
         return default
@@ -676,17 +709,17 @@ class TerminalWidget(QWidget):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
         primary = self._get_style('primary', '#007acc')
-        primary_hover = self._get_style('primary_hover', '#005a9e')
-        primary_pressed = self._get_style('primary_pressed', '#004575')
-        text_primary = self._get_style('text_primary', '#ffffff')
-        bg_input = self._get_style('background_input', '#3c3c3c')
-        border_light = self._get_style('border_light', '#5a5a5d')
-        bg_input_focus = self._get_style('background_input_focus', '#4c4c4c')
-        bg_tertiary = self._get_style('background_tertiary', '#2c2c2c')
-        bg_secondary = self._get_style('background_secondary', '#252526')
-        border_focus = self._get_style('border_focus', '#007acc')
-        font_size = self._get_font_size('medium', '13px')
-        border_radius = self._get_border_radius('small', '4px')
+        primary_hover = self._get_style('primary-hover', '#005a9e')
+        primary_pressed = self._get_style('primary-pressed', '#004575')
+        text_primary = self._get_style('text', '#ffffff')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        bg_input_focus = self._get_style('bg-input-focus', '#4c4c4c')
+        bg_tertiary = self._get_style('bg-tertiary', '#2c2c2c')
+        bg_secondary = self._get_style('bg-secondary', '#252526')
+        border_focus = self._get_style('border-focus', '#007acc')
+        font_size = self._get_font_size('size-lg', '13px')
+        border_radius = self._get_border_radius('sm', '4px')
 
         self.quick_actions = QWidget()
         self.quick_actions.setStyleSheet(f"background-color: {bg_secondary};")
@@ -767,12 +800,12 @@ class TerminalWidget(QWidget):
 
         sidebar_layout.addWidget(self.quick_actions)
 
-        bg_tertiary = self._get_style('background_tertiary', '#2d2d30')
-        bg_main = self._get_style('background_main', '#1e1e1e')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        bg_main = self._get_style('bg-main', '#1e1e1e')
         border = self._get_style('border', '#3c3c3c')
         selection = self._get_style('selection', '#007acc')
-        selection_text = self._get_style('selection_text', '#ffffff')
-        font_size_normal = self._get_font_size('normal', '12px')
+        selection_text = self._get_style('selection-text', '#ffffff')
+        font_size_normal = self._get_font_size('size-md', '12px')
 
         session_label = QLabel("会话列表")
         session_label.setStyleSheet(f"""
@@ -889,8 +922,8 @@ class TerminalWidget(QWidget):
         right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
-        text_secondary = self._get_style('text_secondary', '#cccccc')
-        border_radius_normal = self._get_border_radius('normal', '6px')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
+        border_radius_normal = self._get_border_radius('md', '6px')
 
         self.session_tabs = QTabWidget()
         self.session_tabs.setTabPosition(QTabWidget.TabPosition.North)
@@ -948,11 +981,11 @@ class TerminalWidget(QWidget):
 
     def _create_empty_page(self):
         """创建空白欢迎页面"""
-        bg_secondary = self._get_style('background_secondary', '#252526')
-        text_secondary = self._get_style('text_secondary', '#cccccc')
-        text_primary = self._get_style('text_primary', '#ffffff')
+        bg_secondary = self._get_style('bg-secondary', '#252526')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
+        text_primary = self._get_style('text', '#ffffff')
         primary = self._get_style('primary', '#007acc')
-        font_size_medium = self._get_font_size('medium', '13px')
+        font_size_medium = self._get_font_size('size-lg', '13px')
         
         self.empty_page = QWidget()
         self.empty_page.setStyleSheet(f"background-color: {bg_secondary};")
@@ -1121,6 +1154,37 @@ class TerminalWidget(QWidget):
         """显示字体大小设置菜单"""
         menu = QMenu(self)
         
+        bg = self._get_style('bg-tertiary', '#2d2d30')
+        color = self._get_style('text', '#ffffff')
+        border = self._get_style('border-light', '#4a4a4d')
+        padding = self._get_style('menu_padding', '4px')
+        item_padding = self._get_style('menu_item_padding', '6px 24px')
+        item_selected_bg = self._get_style('primary', '#007acc')
+        item_selected_color = self._get_style('text', '#ffffff')
+        separator_bg = self._get_style('border-light', '#4a4a4d')
+        
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg};
+                color: {color};
+                border: 1px solid {border};
+                padding: {padding};
+            }}
+            QMenu::item {{
+                padding: {item_padding};
+                min-width: 100px;
+            }}
+            QMenu::item:selected {{
+                background-color: {item_selected_bg};
+                color: {item_selected_color};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {separator_bg};
+                margin: 4px 0;
+            }}
+        """)
+        
         font_sizes = [
             ("8px", 8),
             ("10px", 10),
@@ -1173,6 +1237,37 @@ class TerminalWidget(QWidget):
             return
 
         menu = QMenu(self)
+        
+        bg = self._get_style('bg-tertiary', '#2d2d30')
+        color = self._get_style('text', '#ffffff')
+        border = self._get_style('border-light', '#4a4a4d')
+        padding = self._get_style('menu_padding', '4px')
+        item_padding = self._get_style('menu_item_padding', '6px 24px')
+        item_selected_bg = self._get_style('primary', '#007acc')
+        item_selected_color = self._get_style('text', '#ffffff')
+        separator_bg = self._get_style('border-light', '#4a4a4d')
+        
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg};
+                color: {color};
+                border: 1px solid {border};
+                padding: {padding};
+            }}
+            QMenu::item {{
+                padding: {item_padding};
+                min-width: 100px;
+            }}
+            QMenu::item:selected {{
+                background-color: {item_selected_bg};
+                color: {item_selected_color};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {separator_bg};
+                margin: 4px 0;
+            }}
+        """)
 
         connect_action = QAction("新建会话", self)
         connect_action.triggered.connect(lambda: self.create_session(conn))
@@ -1247,8 +1342,27 @@ class ConnectionDialog(QDialog):
         return {}
     
     def _get_style(self, key, default=None):
-        """获取样式配置"""
-        return self._color_scheme.get(key, default)
+        """获取样式配置（支持新旧两种格式）"""
+        value = self._color_scheme.get(key)
+        if value is not None:
+            return value
+        old_key_map = {
+            'background_main': 'bg-main',
+            'background_secondary': 'bg-secondary',
+            'background_tertiary': 'bg-tertiary',
+            'background_input': 'bg-input',
+            'background_input_focus': 'bg-input-focus',
+            'text_primary': 'text',
+            'text_secondary': 'text-secondary',
+            'border_light': 'border-light',
+            'border_focus': 'border-focus',
+            'selection_text': 'selection-text',
+            'primary_hover': 'primary-hover',
+            'primary_pressed': 'primary-pressed'
+        }
+        if key in old_key_map:
+            return self._color_scheme.get(old_key_map[key], default)
+        return default
     
     def _get_font_size(self, key, default='12px'):
         """获取字体大小"""
@@ -1274,22 +1388,22 @@ class ConnectionDialog(QDialog):
         self.setWindowTitle(title)
         self.setGeometry(300, 300, 450, 400)
         
-        bg_secondary = self._get_style('background_secondary', '#252526')
-        text_primary = self._get_style('text_primary', '#ffffff')
-        bg_input = self._get_style('background_input', '#3c3c3c')
-        border_light = self._get_style('border_light', '#5a5a5d')
-        border_focus = self._get_style('border_focus', '#007acc')
-        bg_input_focus = self._get_style('background_input_focus', '#4c4c4c')
-        bg_tertiary = self._get_style('background_tertiary', '#2d2d30')
+        bg_secondary = self._get_style('bg-secondary', '#252526')
+        text_primary = self._get_style('text', '#ffffff')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        border_focus = self._get_style('border-focus', '#007acc')
+        bg_input_focus = self._get_style('bg-input-focus', '#4c4c4c')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
         primary = self._get_style('primary', '#007acc')
-        primary_hover = self._get_style('primary_hover', '#005a9e')
-        primary_pressed = self._get_style('primary_pressed', '#004575')
+        primary_hover = self._get_style('primary-hover', '#005a9e')
+        primary_pressed = self._get_style('primary-pressed', '#004575')
         selection = self._get_style('selection', '#007acc')
-        selection_text = self._get_style('selection_text', '#ffffff')
-        font_size_normal = self._get_font_size('normal', '12px')
-        font_size_medium = self._get_font_size('medium', '13px')
-        border_radius_small = self._get_border_radius('small', '4px')
-        border_radius_normal = self._get_border_radius('normal', '6px')
+        selection_text = self._get_style('selection-text', '#ffffff')
+        font_size_normal = self._get_font_size('size-md', '12px')
+        font_size_medium = self._get_font_size('size-lg', '13px')
+        border_radius_small = self._get_border_radius('sm', '4px')
+        border_radius_normal = self._get_border_radius('md', '6px')
 
         self.setStyleSheet(f"""
             QDialog {{
@@ -1595,75 +1709,121 @@ class SFTPDialog(QDialog):
         self.connection_context = connection_context
         self.sftp = None
         self.current_remote_dir = "/home/"
+        self._color_scheme = self._get_color_scheme(parent)
         self.init_ui()
         self.init_sftp()
+    
+    def _get_color_scheme(self, parent):
+        """从父组件获取颜色方案"""
+        if parent and hasattr(parent, '_color_scheme'):
+            return parent._color_scheme
+        return {}
+    
+    def _get_style(self, key, default=None):
+        """获取样式配置（支持新旧两种格式）"""
+        value = self._color_scheme.get(key)
+        if value is not None:
+            return value
+        old_key_map = {
+            'background_main': 'bg-main',
+            'background_secondary': 'bg-secondary',
+            'background_tertiary': 'bg-tertiary',
+            'background_input': 'bg-input',
+            'background_input_focus': 'bg-input-focus',
+            'text_primary': 'text',
+            'text_secondary': 'text-secondary',
+            'border_light': 'border-light',
+            'border_focus': 'border-focus',
+            'primary_hover': 'primary-hover',
+            'primary_pressed': 'primary-pressed'
+        }
+        if key in old_key_map:
+            return self._color_scheme.get(old_key_map[key], default)
+        return default
 
     def init_ui(self):
         self.setWindowTitle("SFTP 文件传输")
         self.setGeometry(300, 300, 700, 500)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #252526;
-                color: #ffffff;
-            }
-            QLabel {
-                color: #ffffff;
+        
+        bg_secondary = self._get_style('bg-secondary', '#252526')
+        text_primary = self._get_style('text', '#ffffff')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        border_focus = self._get_style('border-focus', '#007acc')
+        bg_input_focus = self._get_style('bg-input-focus', '#4c4c4c')
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        border = self._get_style('border', '#3c3c3c')
+        selection = self._get_style('selection', '#007acc')
+        selection_text = self._get_style('selection-text', '#ffffff')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        primary = self._get_style('primary', '#007acc')
+        primary_hover = self._get_style('primary-hover', '#005a9e')
+        primary_pressed = self._get_style('primary-pressed', '#004575')
+        
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {bg_secondary};
+                color: {text_primary};
+            }}
+            QLabel {{
+                color: {text_primary};
                 font-size: 12px;
-            }
-            QLineEdit {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #5a5a5d;
+            }}
+            QLineEdit {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
                 padding: 6px 10px;
                 border-radius: 4px;
                 font-size: 12px;
-            }
-            QLineEdit:focus {
-                border-color: #007acc;
-                background-color: #4c4c4c;
-            }
-            QListWidget {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border: 1px solid #3c3c3c;
+            }}
+            QLineEdit:focus {{
+                border-color: {border_focus};
+                background-color: {bg_input_focus};
+            }}
+            QListWidget {{
+                background-color: {bg_main};
+                color: {text_primary};
+                border: 1px solid {border};
                 border-radius: 4px;
                 font-size: 12px;
-            }
-            QListWidget::item:selected {
-                background-color: #007acc;
-                color: #ffffff;
-            }
-            QListWidget::item:hover {
-                background-color: #2d2d30;
-            }
-            QPushButton {
-                background-color: #007acc;
-                color: #ffffff;
+            }}
+            QListWidget::item:selected {{
+                background-color: {selection};
+                color: {selection_text};
+            }}
+            QListWidget::item:hover {{
+                background-color: {bg_tertiary};
+            }}
+            QPushButton {{
+                background-color: {primary};
+                color: {text_primary};
                 border: none;
                 padding: 8px 16px;
                 font-size: 13px;
                 font-weight: bold;
                 border-radius: 6px;
-            }
-            QPushButton:hover {
-                background-color: #005a9e;
-            }
-            QPushButton:pressed {
-                background-color: #004575;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {primary_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {primary_pressed};
+            }}
         """)
 
         layout = QVBoxLayout(self)
 
         # 连接状态
+        text_danger = self._get_style('text-danger', '#ff6b6b')
         self.status_label = QLabel("SFTP状态: 未连接")
-        self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold; font-size: 13px;")
+        self.status_label.setStyleSheet(f"color: {text_danger}; font-weight: bold; font-size: 13px;")
         layout.addWidget(self.status_label)
 
         # 本地路径
         local_layout = QHBoxLayout()
         local_label = QLabel("本地路径:")
-        local_label.setStyleSheet("color: #ffffff; font-weight: 500;")
+        local_label.setStyleSheet(f"color: {text_primary}; font-weight: 500;")
         local_layout.addWidget(local_label)
         self.local_path = QLineEdit()
         self.local_path.setText(os.path.expanduser("~"))
@@ -1677,7 +1837,7 @@ class SFTPDialog(QDialog):
         # 远程路径
         remote_layout = QHBoxLayout()
         remote_label = QLabel("远程路径:")
-        remote_label.setStyleSheet("color: #ffffff; font-weight: 500;")
+        remote_label.setStyleSheet(f"color: {text_primary}; font-weight: 500;")
         remote_layout.addWidget(remote_label)
         self.remote_path = QLineEdit()
         self.remote_path.setText(self.current_remote_dir)
@@ -1696,23 +1856,23 @@ class SFTPDialog(QDialog):
         self.download_btn = QPushButton("下载到本地")
         self.refresh_btn = QPushButton("刷新列表")
         close_btn = QPushButton("关闭")
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #5a5a5d;
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
                 padding: 8px 16px;
                 font-size: 13px;
                 font-weight: bold;
                 border-radius: 6px;
-            }
-            QPushButton:hover {
-                background-color: #4c4c4c;
-                border-color: #007acc;
-            }
-            QPushButton:pressed {
-                background-color: #2c2c2c;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {bg_input_focus};
+                border-color: {border_focus};
+            }}
+            QPushButton:pressed {{
+                background-color: {bg_tertiary};
+            }}
         """)
         btn_layout.addWidget(self.upload_btn)
         btn_layout.addWidget(self.download_btn)
@@ -1728,15 +1888,18 @@ class SFTPDialog(QDialog):
     def init_sftp(self):
         """初始化SFTP连接"""
         strategy = self.connection_context._strategy
+        text_danger = self._get_style('text-danger', '#ff6b6b')
+        text_success = self._get_style('text-success', '#00ff00')
+        
         if not isinstance(strategy, SSHConnection):
             self.status_label.setText("SFTP状态: 仅支持SSH连接")
-            self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+            self.status_label.setStyleSheet(f"color: {text_danger}; font-weight: bold;")
             self.set_buttons_enabled(False)
             return
 
         if not strategy.client:
             self.status_label.setText("SFTP状态: SSH未连接")
-            self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+            self.status_label.setStyleSheet(f"color: {text_danger}; font-weight: bold;")
             self.set_buttons_enabled(False)
             return
 
@@ -1745,11 +1908,11 @@ class SFTPDialog(QDialog):
             self.current_remote_dir = self.sftp.normalize(".")
             self.remote_path.setText(self.current_remote_dir)
             self.status_label.setText(f"SFTP状态: 已连接 ({strategy.host})")
-            self.status_label.setStyleSheet("color: #00ff00; font-weight: bold;")
+            self.status_label.setStyleSheet(f"color: {text_success}; font-weight: bold;")
             self.refresh()
         except Exception as e:
             self.status_label.setText(f"SFTP状态: 连接失败 ({str(e)})")
-            self.status_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+            self.status_label.setStyleSheet(f"color: {text_danger}; font-weight: bold;")
             self.set_buttons_enabled(False)
 
     def set_buttons_enabled(self, enabled):

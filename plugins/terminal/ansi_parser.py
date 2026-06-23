@@ -59,7 +59,7 @@ class ANSIParser:
         107: QColor(255, 255, 255),    # 亮白背景
     }
 
-    def __init__(self, enable_color=True):
+    def __init__(self, enable_color=False):
         self.current_format = QTextCharFormat()
         self.default_foreground = QColor(204, 204, 204)  # #cccccc
         self.default_background = QColor(30, 30, 30)     # #1e1e1e (与主题一致)

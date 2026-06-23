@@ -64,7 +64,7 @@ class QuicklyCmdWidget(QWidget):
         }
 
     def get_style(self, key, default=None):
-        """获取样式配置"""
+        """获取样式配置（支持新旧两种格式）"""
         if self._config_manager:
             return self._config_manager.get_color(key, default)
         return default
@@ -99,14 +99,14 @@ class QuicklyCmdWidget(QWidget):
     def _get_tab_widget_style(self):
         """生成标签页样式"""
         primary = self.get_style('primary', '#007acc')
-        bg_main = self.get_style('background_main', '#1e1e1e')
-        bg_tertiary = self.get_style('background_tertiary', '#2d2d30')
+        bg_main = self.get_style('bg-main', '#1e1e1e')
+        bg_tertiary = self.get_style('bg-tertiary', '#2d2d30')
         border = self.get_style('border', '#3d3d40')
-        text_primary = self.get_style('text_primary', '#ffffff')
-        text_secondary = self.get_style('text_secondary', '#cccccc')
-        bg_input = self.get_style('background_input', '#3c3c3c')
-        font_size = self.get_font_size('medium', '13px')
-        border_radius = self.get_border_radius('normal', '6px')
+        text_primary = self.get_style('text', '#ffffff')
+        text_secondary = self.get_style('text-secondary', '#cccccc')
+        bg_input = self.get_style('bg-input', '#3c3c3c')
+        font_size = self.get_font_size('size-lg', '13px')
+        border_radius = self.get_border_radius('md', '6px')
 
         return f"""
             QTabWidget::pane {{
@@ -138,11 +138,11 @@ class QuicklyCmdWidget(QWidget):
 
     def _get_group_box_style(self):
         """生成GroupBox样式"""
-        text_primary = self.get_style('text_primary', '#ffffff')
-        border_light = self.get_style('border_light', '#4a4a4d')
-        border_radius = self.get_border_radius('large', '8px')
-        bg_secondary = self.get_style('background_secondary', '#252526')
-        font_size = self.get_font_size('medium', '13px')
+        text_primary = self.get_style('text', '#ffffff')
+        border_light = self.get_style('border-light', '#4a4a4d')
+        border_radius = self.get_border_radius('lg', '8px')
+        bg_secondary = self.get_style('bg-secondary', '#252526')
+        font_size = self.get_font_size('size-lg', '13px')
 
         return f"""
             QGroupBox {{
@@ -164,17 +164,17 @@ class QuicklyCmdWidget(QWidget):
 
     def _get_combo_box_style(self):
         """生成ComboBox样式"""
-        bg_input = self.get_style('background_input', '#3c3c3c')
-        text_primary = self.get_style('text_primary', '#ffffff')
-        border_light = self.get_style('border_light', '#4a4a4d')
-        border_focus = self.get_style('border_focus', '#007acc')
-        bg_input_focus = self.get_style('background_input_focus', '#4c4c4c')
-        text_secondary = self.get_style('text_secondary', '#cccccc')
-        bg_tertiary = self.get_style('background_tertiary', '#2d2d30')
+        bg_input = self.get_style('bg-input', '#3c3c3c')
+        text_primary = self.get_style('text', '#ffffff')
+        border_light = self.get_style('border-light', '#4a4a4d')
+        border_focus = self.get_style('border-focus', '#007acc')
+        bg_input_focus = self.get_style('bg-input-focus', '#4c4c4c')
+        text_secondary = self.get_style('text-secondary', '#cccccc')
+        bg_tertiary = self.get_style('bg-tertiary', '#2d2d30')
         selection = self.get_style('selection', '#007acc')
-        selection_text = self.get_style('selection_text', '#ffffff')
-        border_radius = self.get_border_radius('small', '4px')
-        font_size = self.get_font_size('normal', '12px')
+        selection_text = self.get_style('selection-text', '#ffffff')
+        border_radius = self.get_border_radius('sm', '4px')
+        font_size = self.get_font_size('size-md', '12px')
 
         return f"""
             QComboBox {{
@@ -217,15 +217,15 @@ class QuicklyCmdWidget(QWidget):
 
     def _get_line_edit_style(self, read_only=False):
         """生成LineEdit样式"""
-        bg_input = self.get_style('background_input', '#3c3c3c')
-        text_primary = self.get_style('text_primary', '#ffffff')
-        border_light = self.get_style('border_light', '#4a4a4d')
-        border_focus = self.get_style('border_focus', '#007acc')
-        bg_input_focus = self.get_style('background_input_focus', '#4c4c4c')
-        bg_main = self.get_style('background_main', '#1e1e1e')
-        text_success = self.get_style('text_success', '#00ff00')
-        border_radius = self.get_border_radius('small', '4px')
-        font_size = self.get_font_size('normal', '12px')
+        bg_input = self.get_style('bg-input', '#3c3c3c')
+        text_primary = self.get_style('text', '#ffffff')
+        border_light = self.get_style('border-light', '#4a4a4d')
+        border_focus = self.get_style('border-focus', '#007acc')
+        bg_input_focus = self.get_style('bg-input-focus', '#4c4c4c')
+        bg_main = self.get_style('bg-main', '#1e1e1e')
+        text_success = self.get_style('text-success', '#00ff00')
+        border_radius = self.get_border_radius('sm', '4px')
+        font_size = self.get_font_size('size-md', '12px')
 
         if read_only:
             return f"""
@@ -258,17 +258,17 @@ class QuicklyCmdWidget(QWidget):
     def _get_button_style(self, type='primary'):
         """生成按钮样式"""
         primary = self.get_style('primary', '#007acc')
-        primary_hover = self.get_style('primary_hover', '#005a9e')
-        primary_pressed = self.get_style('primary_pressed', '#004575')
-        text_primary = self.get_style('text_primary', '#ffffff')
-        bg_input = self.get_style('background_input', '#3c3c3c')
-        border_light = self.get_style('border_light', '#4a4a4d')
-        bg_input_focus = self.get_style('background_input_focus', '#4c4c4c')
-        bg_tertiary = self.get_style('background_tertiary', '#2d2d30')
+        primary_hover = self.get_style('primary-hover', '#005a9e')
+        primary_pressed = self.get_style('primary-pressed', '#004575')
+        text_primary = self.get_style('text', '#ffffff')
+        bg_input = self.get_style('bg-input', '#3c3c3c')
+        border_light = self.get_style('border-light', '#4a4a4d')
+        bg_input_focus = self.get_style('bg-input-focus', '#4c4c4c')
+        bg_tertiary = self.get_style('bg-tertiary', '#2d2d30')
         success = self.get_style('success', '#28a745')
-        success_hover = self.get_style('success_hover', '#218838')
-        border_radius = self.get_border_radius('normal', '6px')
-        font_size = self.get_font_size('medium', '14px')
+        success_hover = self.get_style('success-hover', '#218838')
+        border_radius = self.get_border_radius('md', '6px')
+        font_size = self.get_font_size('size-lg', '14px')
 
         if type == 'success':
             return f"""
@@ -328,10 +328,10 @@ class QuicklyCmdWidget(QWidget):
 
     def _get_plain_text_edit_style(self):
         """生成PlainTextEdit样式"""
-        text_success = self.get_style('text_success', '#00ff00')
+        text_success = self.get_style('text-success', '#00ff00')
         border = self.get_style('border', '#3c3c3c')
-        border_radius = self.get_border_radius('small', '4px')
-        font_size = self.get_font_size('normal', '11px')
+        border_radius = self.get_border_radius('sm', '4px')
+        font_size = self.get_font_size('size-sm', '11px')
 
         return f"""
             QPlainTextEdit {{
@@ -356,8 +356,8 @@ class QuicklyCmdWidget(QWidget):
         options_layout = QFormLayout(options_group)
         options_layout.setSpacing(10)
 
-        text_primary = self.get_style('text_primary', '#ffffff')
-        font_size = self.get_font_size('normal', '12px')
+        text_primary = self.get_style('text', '#ffffff')
+        font_size = self.get_font_size('size-md', '12px')
 
         env_label = QLabel("编译环境:")
         env_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
@@ -396,8 +396,8 @@ class QuicklyCmdWidget(QWidget):
         detail_layout = QVBoxLayout(detail_group)
 
         self.detail_text = QLabel("选择编译环境后显示详细配置信息")
-        text_success = self.get_style('text_success', '#00ff00')
-        font_size = self.get_font_size('normal', '12px')
+        text_success = self.get_style('text-success', '#00ff00')
+        font_size = self.get_font_size('size-md', '12px')
         self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {font_size}; font-weight: 500;")
         self.detail_text.setWordWrap(True)
         detail_layout.addWidget(self.detail_text)
@@ -447,7 +447,7 @@ class QuicklyCmdWidget(QWidget):
         self.status_bar = QWidget()
         self.status_bar.setFixedHeight(30)
         primary = self.get_style('primary', '#007acc')
-        self.status_bar.setStyleSheet(f"background-color: {primary}; border-radius: {self.get_border_radius('small', '4px')};")
+        self.status_bar.setStyleSheet(f"background-color: {primary}; border-radius: {self.get_border_radius('sm', '4px')};")
         status_layout = QHBoxLayout(self.status_bar)
         status_layout.setContentsMargins(10, 0, 10, 0)
 
@@ -572,8 +572,8 @@ class QuicklyCmdWidget(QWidget):
         tool1_group.setStyleSheet(self._get_group_box_style())
         tool1_layout = QVBoxLayout(tool1_group)
 
-        text_primary = self.get_style('text_primary', '#ffffff')
-        font_size = self.get_font_size('normal', '12px')
+        text_primary = self.get_style('text', '#ffffff')
+        font_size = self.get_font_size('size-md', '12px')
 
         result_layout = QFormLayout()
         result_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
