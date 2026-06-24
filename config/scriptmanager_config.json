@@ -1,0 +1,8 @@
+{
+    "name": "ScriptManager",
+    "display_name": "脚本管理",
+    "version": "1.0.0",
+    "description": "Python脚本管理和执行工具",
+    "toolbar": [],
+    "menu": null
+}

@@ -58,9 +58,9 @@ class QuicklyCmdWidget(QWidget):
                 return plugin_config.get('compile', {})
         
         return {
-            "compile_environments": [{"name": "本地环境", "server": "localhost", "path": ".", "docker": None}],
-            "compile_components": [{"name": "全部组件", "targets": ["all"]}],
-            "test_environments": [{"name": "单元测试", "type": "unit", "command": "pytest"}]
+            "compile_environments": [{"name": "本地环境", "server": "localhost", "path": ".", "docker": None, "script": ""}],
+            "compile_components": [{"name": "全部组件", "targets": ["all"], "script": ""}],
+            "test_environments": [{"name": "单元测试", "type": "unit", "command": "pytest", "script": ""}]
         }
 
     def get_style(self, key, default=None):

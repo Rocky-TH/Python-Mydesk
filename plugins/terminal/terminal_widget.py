@@ -269,44 +269,142 @@ class SessionTab(QWidget):
 
     def _insert_text_with_cr(self, cursor, text):
         """插入文本，处理 \r 回车符、\b 退格符、\t 制表符等控制字符"""
-        # 快速检查是否包含控制字符
-        if '\r' not in text and '\b' not in text and '\x7f' not in text and '\t' not in text:
+        if '\r' not in text and '\b' not in text and '\x7f' not in text and '\t' not in text and '\x1b' not in text:
             cursor.insertText(text)
             return
         
         i = 0
         while i < len(text):
             if text[i] == '\r':
-                # 回车：移动到行首并删除到行尾的所有内容（用于Tab补全等场景）
                 cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
                 cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
                 cursor.removeSelectedText()
                 i += 1
             elif text[i] == '\b':
-                # 退格：删除前一个字符
-                cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
-                cursor.removeSelectedText()
-                i += 1
+                if i + 2 < len(text) and text[i+1] == ' ' and text[i+2] == '\b':
+                    if cursor.position() > 0:
+                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                    i += 3
+                elif i + 1 < len(text) and text[i+1] == '\b':
+                    if cursor.position() > 0:
+                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                    if cursor.position() > 0:
+                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                    i += 2
+                else:
+                    if cursor.position() > 0:
+                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                    i += 1
             elif text[i] == '\x7f':
-                # DEL 键：删除当前字符
-                cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
-                cursor.removeSelectedText()
+                if cursor.position() < cursor.document().characterCount() - 1:
+                    cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
+                    cursor.removeSelectedText()
                 i += 1
             elif text[i] == '\t':
-                # Tab：插入4个空格
                 cursor.insertText("    ")
                 i += 1
+            elif text[i] == '\x1b':
+                seq_end = i + 1
+                if seq_end < len(text) and text[seq_end] == '[':
+                    seq_end += 1
+                    while seq_end < len(text) and (text[seq_end].isdigit() or text[seq_end] == ';'):
+                        seq_end += 1
+                    if seq_end < len(text) and text[seq_end].isalpha():
+                        seq_end += 1
+                elif seq_end < len(text) and text[seq_end].isalpha():
+                    seq_end += 1
+                
+                if seq_end > i:
+                    ansi_seq = text[i:seq_end]
+                    self._apply_cursor_sequence(cursor, ansi_seq)
+                i = seq_end
             else:
-                # 找到下一个控制字符
                 next_control = len(text)
                 for j in range(i, len(text)):
-                    if text[j] in '\r\b\x7f\t':
+                    if text[j] in '\r\b\x7f\t\x1b':
                         next_control = j
                         break
-                # 批量插入普通文本
                 if next_control > i:
                     cursor.insertText(text[i:next_control])
                 i = next_control
+    
+    def _apply_cursor_sequence(self, cursor, seq):
+        """应用ANSI光标移动序列"""
+        if not seq or seq[0] != '\x1b':
+            return
+        
+        if seq.startswith('\x1b['):
+            # CSI序列
+            if len(seq) >= 3:
+                params_part = seq[2:-1]
+                end_char = seq[-1]
+                
+                # 解析参数
+                params = []
+                if params_part:
+                    params = [int(p) for p in params_part.split(';') if p.isdigit()]
+                
+                # 光标移动命令
+                if end_char == 'A':
+                    # 上移
+                    count = params[0] if params else 1
+                    for _ in range(count):
+                        cursor.movePosition(QTextCursor.MoveOperation.Up)
+                elif end_char == 'B':
+                    # 下移
+                    count = params[0] if params else 1
+                    for _ in range(count):
+                        cursor.movePosition(QTextCursor.MoveOperation.Down)
+                elif end_char == 'C':
+                    # 右移
+                    count = params[0] if params else 1
+                    for _ in range(count):
+                        cursor.movePosition(QTextCursor.MoveOperation.Right)
+                elif end_char == 'D':
+                    # 左移
+                    count = params[0] if params else 1
+                    for _ in range(count):
+                        cursor.movePosition(QTextCursor.MoveOperation.Left)
+                elif end_char in ('H', 'f'):
+                    # 移动到指定位置
+                    if len(params) >= 2:
+                        row, col = params[0], params[1]
+                        cursor.movePosition(QTextCursor.MoveOperation.Start)
+                        for _ in range(row - 1):
+                            cursor.movePosition(QTextCursor.MoveOperation.Down)
+                        for _ in range(col - 1):
+                            cursor.movePosition(QTextCursor.MoveOperation.Right)
+                    else:
+                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+                elif end_char == 'J':
+                    # 清屏
+                    if params and params[0] == 2:
+                        cursor.select(QTextCursor.SelectionType.Document)
+                        cursor.removeSelectedText()
+                    elif params and params[0] == 1:
+                        cursor.movePosition(QTextCursor.MoveOperation.Start)
+                        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                    else:
+                        cursor.movePosition(QTextCursor.MoveOperation.End)
+                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                elif end_char == 'K':
+                    # 清除行
+                    if params and params[0] == 2:
+                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+                        cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                    elif params and params[0] == 1:
+                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
+                    else:
+                        cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
+                        cursor.removeSelectedText()
 
     def make_format(self, color):
         """创建文本格式"""
@@ -338,23 +436,35 @@ class SessionTab(QWidget):
                 self._flush_output_buffer()
 
     def _flush_output_buffer(self):
-        """刷新输出缓冲区，处理不完整的ANSI序列"""
+        """刷新输出缓冲区，处理不完整的ANSI序列和退格序列"""
         if not self._output_buffer:
             return
 
-        # 检查最后一个字符是否是ESC（\x1b），如果是则保留到下次
+        # 检查退格序列是否完整
+        # 标准退格序列：\b \b 或 \b(单独)
+        # 如果缓冲区末尾有 \b，等待更多数据以确保序列完整
+        buffer_len = len(self._output_buffer)
+        if buffer_len >= 1 and self._output_buffer[-1] == '\b':
+            # 如果最后是 \b，检查是否完整
+            if buffer_len >= 3 and self._output_buffer[-3] == '\b' and self._output_buffer[-2] == ' ':
+                # \b \b 序列完整，可以输出
+                pass
+            elif buffer_len >= 2 and self._output_buffer[-2] == '\b':
+                # \b\b 序列完整，可以输出
+                pass
+            else:
+                # 不完整的退格序列，等待更多数据
+                return
+
         if self._output_buffer.endswith('\x1b'):
             self.write_output(self._output_buffer[:-1])
             self._output_buffer = '\x1b'
             return
 
-        # 检查最后一个不完整的ANSI序列
         last_esc = self._output_buffer.rfind('\x1b')
         if last_esc != -1:
             after_esc = self._output_buffer[last_esc:]
-            # 如果 after_esc 是不完整的ANSI序列（以 \x1b[ 开头）
             if len(after_esc) >= 2 and after_esc[1] == '[':
-                # ANSI CSI序列可能的结尾字符
                 if not re.search(r'[mHKABCDsufrJLMXP@Zc]|n$', after_esc):
                     complete_part = self._output_buffer[:last_esc]
                     self._output_buffer = after_esc
@@ -362,14 +472,12 @@ class SessionTab(QWidget):
                         self.write_output(complete_part)
                     return
             elif len(after_esc) == 1:
-                # 只有 \x1b，不完整
                 complete_part = self._output_buffer[:last_esc]
                 self._output_buffer = after_esc
                 if complete_part:
                     self.write_output(complete_part)
                 return
 
-        # 完整的序列，全部输出
         complete_data = self._output_buffer
         self._output_buffer = ""
         self.write_output(complete_data)
@@ -383,94 +491,77 @@ class SessionTab(QWidget):
         text = event.text()
         modifiers = event.modifiers()
 
-        # 获取底层策略
         strategy = self.connection_context._strategy
         has_raw = hasattr(strategy, 'send_raw') and self.interactive_mode
 
-        # Ctrl+C - 发送中断信号
         if key == Qt.Key.Key_C and modifiers == Qt.KeyboardModifier.ControlModifier:
             if has_raw:
-                strategy.send_raw("\x03")  # ETX (Ctrl+C)
+                strategy.send_raw("\x03")
             return
 
-        # Ctrl+D - 发送EOF
         if key == Qt.Key.Key_D and modifiers == Qt.KeyboardModifier.ControlModifier:
             if has_raw:
-                strategy.send_raw("\x04")  # EOT (Ctrl+D)
+                strategy.send_raw("\x04")
             return
 
-        # Ctrl+Z - 挂起进程
         if key == Qt.Key.Key_Z and modifiers == Qt.KeyboardModifier.ControlModifier:
             if has_raw:
-                strategy.send_raw("\x1a")  # SUB (Ctrl+Z)
+                strategy.send_raw("\x1a")
             return
 
-        # Ctrl+L - 清屏
         if key == Qt.Key.Key_L and modifiers == Qt.KeyboardModifier.ControlModifier:
             if has_raw:
-                strategy.send_raw("\x0c")  # FF (Ctrl+L)
+                strategy.send_raw("\x0c")
             return
 
-        # 方向键
+        # 方向键 - 交互模式下完全由远程控制光标位置
         if key == Qt.Key.Key_Up:
             if has_raw:
-                strategy.send_raw("\x1b[A")  # ANSI 上箭头
-                self.navigate_history(-1)
+                strategy.send_raw("\x1b[A")
             return
         elif key == Qt.Key.Key_Down:
             if has_raw:
-                strategy.send_raw("\x1b[B")  # ANSI 下箭头
-                self.navigate_history(1)
+                strategy.send_raw("\x1b[B")
             return
         elif key == Qt.Key.Key_Left:
             if has_raw:
-                strategy.send_raw("\x1b[D")  # ANSI 左箭头
+                strategy.send_raw("\x1b[D")
             return
         elif key == Qt.Key.Key_Right:
             if has_raw:
-                strategy.send_raw("\x1b[C")  # ANSI 右箭头
+                strategy.send_raw("\x1b[C")
             return
 
-        # Home / End
         if key == Qt.Key.Key_Home:
             if has_raw:
-                strategy.send_raw("\x1b[H")  # ANSI Home
+                strategy.send_raw("\x1b[H")
             return
         elif key == Qt.Key.Key_End:
             if has_raw:
-                strategy.send_raw("\x1b[F")  # ANSI End
+                strategy.send_raw("\x1b[F")
             return
 
-        # Page Up / Page Down
         if key == Qt.Key.Key_PageUp:
             if has_raw:
-                strategy.send_raw("\x1b[5~")  # ANSI PageUp
+                strategy.send_raw("\x1b[5~")
             return
         elif key == Qt.Key.Key_PageDown:
             if has_raw:
-                strategy.send_raw("\x1b[6~")  # ANSI PageDown
+                strategy.send_raw("\x1b[6~")
             return
 
-        # Tab
         if key == Qt.Key.Key_Tab:
             if has_raw:
                 strategy.send_raw("\t")
             return
 
-        # Esc
         if key == Qt.Key.Key_Escape:
             if has_raw:
                 strategy.send_raw("\x1b")
             return
 
-        # 回车
         if key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
             if has_raw:
-                # 交互模式：发送换行到远程，由远程处理
-                if self.current_input.strip():
-                    self.command_history.append(self.current_input)
-                self.history_index = len(self.command_history)
-                self.current_input = ""
                 strategy.send_raw("\n")
             else:
                 self.execute_command()
@@ -479,29 +570,37 @@ class SessionTab(QWidget):
         # 退格 / 删除
         if key == Qt.Key.Key_Backspace:
             if has_raw:
-                if len(self.current_input) > 0:
-                    self.current_input = self.current_input[:-1]
-                # 发送退格键（DEL \x7f）
-                strategy.send_raw("\x7f")
+                strategy.send_raw(self._get_backspace_char())
             elif len(self.current_input) > 0:
                 self.current_input = self.current_input[:-1]
                 self.redraw_input_line()
             return
         elif key == Qt.Key.Key_Delete:
             if has_raw:
-                strategy.send_raw("\x1b[3~")  # ANSI Delete
+                strategy.send_raw("\x1b[3~")
             return
 
-        # 普通字符 - 包括特殊符号如 - = 等
+        # 普通字符
         if text:
             if has_raw:
-                # 交互模式：直接发送到远程，不在本地显示
-                self.current_input += text
                 strategy.send_raw(text)
             else:
-                # 非交互模式：本地显示
                 self.current_input += text
                 self.write_output(text, "#ffffff")
+    
+    def _get_backspace_char(self):
+        """获取退格字符，支持配置或自动检测"""
+        # 默认使用 \x08 (BS - Backspace)，这是大多数现代终端的标准
+        # 某些旧系统可能需要 \x7f (DEL)
+        return getattr(self, '_backspace_char', '\x08')
+
+    def _auto_detect_backspace(self):
+        """自动检测服务器期望的退格字符类型"""
+        # 发送测试序列，检测服务器响应
+        # 大多数现代SSH服务器使用 \x08 (BS)
+        # 某些旧系统或特定配置可能需要 \x7f (DEL)
+        # 这里我们采用保守策略：默认使用 \x08，如果出现乱码则切换到 \x7f
+        pass
 
     def handle_input_method_text(self, text):
         """处理输入法输入的文本（如中文）"""

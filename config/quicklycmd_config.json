@@ -20,14 +20,16 @@
                     "username": "zhang163",
                     "password": "zhang163",
                     "key_file": ""
-                }
+                },
+                "script": "# 连接后执行的脚本\nlog('开始编译前准备...')\nsession.send_cmd('cd /home/demo')\nsession.set_result('ready', True)"
             }
         ],
         "compile_components": [
             {
                 "name": "全部组件",
                 "targets": ["all"],
-                "description": "编译所有组件"
+                "description": "编译所有组件",
+                "script": "# 组件构建脚本\nlog('开始构建组件...')"
             }
         ],
         "test_environments": [
@@ -35,25 +37,22 @@
                 "name": "单元测试",
                 "type": "unit",
                 "command": "pytest tests/unit",
-                "description": "运行单元测试"
+                "description": "运行单元测试",
+                "script": "# 测试脚本\nlog('准备运行单元测试...')\noutput = session.send_cmd('echo \"Test environment ready\"')\nsession.set_result('test_prepared', True)"
             },
             {
                 "name": "集成测试",
                 "type": "integration",
                 "command": "pytest tests/integration",
-                "description": "运行集成测试"
+                "description": "运行集成测试",
+                "script": "# 集成测试脚本\nlog('准备运行集成测试...')"
             },
             {
                 "name": "性能测试",
                 "type": "performance",
                 "command": "pytest tests/performance",
-                "description": "运行性能测试"
-            },
-            {
-                "name": "全部测试",
-                "type": "all",
-                "command": "pytest tests",
-                "description": "运行所有测试"
+                "description": "运行性能测试",
+                "script": "# 性能测试脚本\nlog('准备运行性能测试...')"
             }
         ]
     }

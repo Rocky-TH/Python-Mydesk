@@ -101,18 +101,40 @@ class SSHConnection(ConnectionBase):
         self.shell = None
         self.client = None
 
-    def send_command(self, command):
+    def send_command(self, command, timeout=5.0):
+        """发送命令并等待响应
+        
+        Args:
+            command: 要发送的命令
+            timeout: 等待响应的超时时间（秒）
+            
+        Returns:
+            str: 响应内容
+        """
         if not self.connected or not self.shell:
             return "[错误: 未连接]\n"
         
         try:
             self.shell.send(command + "\n")
-            time.sleep(0.3)
+            
+            # 使用timeout参数控制等待时间
+            wait_time = min(timeout, 0.5)  # 初始等待时间
+            time.sleep(wait_time)
+            
             response = ""
-            while self.shell.recv_ready():
-                data = self.shell.recv(4096).decode('utf-8', errors='replace')
-                response += data
-                time.sleep(0.1)
+            end_time = time.time() + timeout
+            
+            while time.time() < end_time:
+                if self.shell.recv_ready():
+                    data = self.shell.recv(4096).decode('utf-8', errors='replace')
+                    response += data
+                    time.sleep(0.1)
+                else:
+                    # 如果没有更多数据，稍微等待后退出
+                    time.sleep(0.05)
+                    if not self.shell.recv_ready():
+                        break
+            
             return response if response else ""
         except Exception as e:
             return f"[错误: {str(e)}]\n"

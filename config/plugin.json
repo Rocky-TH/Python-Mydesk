@@ -13,6 +13,12 @@
             "main_class": "TerminalPlugin"
         },
         {
+            "name": "ScriptManager",
+            "display_name": "脚本管理",
+            "module": "plugins.script_manager",
+            "main_class": "ScriptManagerPlugin"
+        },
+        {
             "name": "RemoteCmd",
             "display_name": "远程命令",
             "module": "plugins.remote_cmd",

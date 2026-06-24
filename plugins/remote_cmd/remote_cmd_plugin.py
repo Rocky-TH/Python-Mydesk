@@ -4,6 +4,7 @@ import json
 import re
 
 from plugins.terminal.connection_factory import ConnectionFactory
+from plugins.script_runner import Session, ScriptRunner
 
 
 class RemoteCmdPlugin:
@@ -442,3 +443,235 @@ class RemoteCmdPlugin:
                     if conn and conn.is_connected():
                         return conn.read_output(timeout)
         return ""
+
+    # ========== Python脚本执行相关方法 ==========
+
+    def _get_connection_for_env(self, env_name):
+        """获取指定环境的连接对象
+        
+        Args:
+            env_name: 环境名称
+            
+        Returns:
+            tuple: (connection, env_config) 或 (None, None)
+        """
+        environments = self.get_compile_environments()
+        
+        for env in environments:
+            if env['name'] == env_name:
+                conn_config = env.get('connection')
+                if conn_config:
+                    conn_type = conn_config.get('type')
+                    conn_id = f"{conn_type}_{conn_config.get('host', conn_config.get('port', ''))}"
+                    with self._lock:
+                        conn = self._connections.get(conn_id)
+                    if conn and conn.is_connected():
+                        return (conn, env)
+                else:
+                    # 无连接配置的环境，返回None
+                    return (None, env)
+        
+        return (None, None)
+
+    def execute_script(self, env_name, script_content, timeout=60):
+        """在指定环境上执行Python脚本
+        
+        Args:
+            env_name: 环境名称
+            script_content: Python脚本内容
+            timeout: 执行超时时间（秒）
+            
+        Returns:
+            dict: 执行结果 {
+                'success': bool,
+                'env_name': str,
+                'output': str,
+                'error': str,
+                'result': any,
+                'session_result': dict
+            }
+        """
+        result = {
+            'success': False,
+            'env_name': env_name,
+            'output': '',
+            'error': '',
+            'result': None,
+            'session_result': None
+        }
+        
+        # 获取连接
+        conn, env_config = self._get_connection_for_env(env_name)
+        
+        if env_config is None:
+            result['error'] = f"未找到环境: {env_name}"
+            return result
+        
+        # 创建会话对象
+        session = Session(conn, env_name, env_config)
+        
+        # 创建脚本执行器
+        runner = ScriptRunner()
+        
+        # 执行脚本（带超时保护）
+        import threading
+        
+        exec_result = {'result': None, 'error': None}
+        
+        def run_script():
+            try:
+                exec_result['result'] = runner.execute(script_content, session)
+            except Exception as e:
+                exec_result['error'] = str(e)
+        
+        thread = threading.Thread(target=run_script)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout=timeout)
+        
+        if thread.is_alive():
+            result['error'] = f"脚本执行超时（{timeout}秒）"
+            return result
+        
+        if exec_result['error']:
+            result['error'] = exec_result['error']
+            return result
+        
+        script_result = exec_result['result']
+        if script_result:
+            result['success'] = script_result.get('success', False)
+            result['output'] = script_result.get('output', '')
+            result['error'] = script_result.get('error', '')
+            result['result'] = script_result.get('result')
+            result['session_result'] = script_result.get('session_result')
+        
+        return result
+
+    def execute_script_file(self, env_name, script_path, timeout=60):
+        """在指定环境上执行Python脚本文件
+        
+        Args:
+            env_name: 环境名称
+            script_path: 脚本文件路径
+            timeout: 执行超时时间
+            
+        Returns:
+            dict: 执行结果
+        """
+        try:
+            with open(script_path, 'r', encoding='utf-8') as f:
+                script_content = f.read()
+            return self.execute_script(env_name, script_content, timeout)
+        except Exception as e:
+            return {
+                'success': False,
+                'env_name': env_name,
+                'output': '',
+                'error': f"读取脚本文件失败: {str(e)}",
+                'result': None,
+                'session_result': None
+            }
+
+    def execute_pre_script(self, env_name, trigger='compile'):
+        """执行预置脚本（在特定操作之前执行）
+        
+        Args:
+            env_name: 环境名称
+            trigger: 触发点 ('compile', 'test', 'before_connect')
+            
+        Returns:
+            dict: 执行结果
+        """
+        environments = self.get_compile_environments()
+        
+        for env in environments:
+            if env['name'] == env_name:
+                pre_script = env.get(f'pre_{trigger}_script') or env.get('pre_script')
+                if pre_script:
+                    return self.execute_script(env_name, pre_script)
+        
+        return {'success': True, 'env_name': env_name, 'output': '', 'error': '', 'result': None}
+
+    def execute_post_script(self, env_name, trigger='compile'):
+        """执行后置脚本（在特定操作之后执行）
+        
+        Args:
+            env_name: 环境名称
+            trigger: 触发点 ('compile', 'test', 'after_disconnect')
+            
+        Returns:
+            dict: 执行结果
+        """
+        environments = self.get_compile_environments()
+        
+        for env in environments:
+            if env['name'] == env_name:
+                post_script = env.get(f'post_{trigger}_script') or env.get('post_script')
+                if post_script:
+                    return self.execute_script(env_name, post_script)
+        
+        return {'success': True, 'env_name': env_name, 'output': '', 'error': '', 'result': None}
+
+    def run_script_with_context(self, env_name, script_content, context_vars=None):
+        """在指定环境上执行Python脚本（带上下文变量）
+        
+        Args:
+            env_name: 环境名称
+            script_content: Python脚本内容
+            context_vars: 额外的上下文变量字典
+            
+        Returns:
+            dict: 执行结果
+        """
+        result = {
+            'success': False,
+            'env_name': env_name,
+            'output': '',
+            'error': '',
+            'result': None,
+            'session_result': None
+        }
+        
+        # 获取连接
+        conn, env_config = self._get_connection_for_env(env_name)
+        
+        if env_config is None:
+            result['error'] = f"未找到环境: {env_name}"
+            return result
+        
+        # 创建会话对象
+        session = Session(conn, env_name, env_config)
+        
+        # 添加上下文变量
+        runner = ScriptRunner()
+        if context_vars:
+            runner._globals.update(context_vars)
+        
+        # 执行脚本
+        try:
+            exec_result = runner.execute(script_content, session)
+            result['success'] = exec_result.get('success', False)
+            result['output'] = exec_result.get('output', '')
+            result['error'] = exec_result.get('error', '')
+            result['result'] = exec_result.get('result')
+            result['session_result'] = exec_result.get('session_result')
+        except Exception as e:
+            result['error'] = str(e)
+        
+        return result
+
+    def validate_script(self, script_content):
+        """验证Python脚本语法
+        
+        Args:
+            script_content: Python脚本内容
+            
+        Returns:
+            dict: 验证结果 {
+                'valid': bool,
+                'error': str,
+                'line': int,
+                'column': int
+            }
+        """
+        return ScriptRunner.validate(script_content)
