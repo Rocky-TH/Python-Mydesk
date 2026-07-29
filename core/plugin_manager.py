@@ -2,12 +2,18 @@ import importlib
 import os
 import sys
 
+from .menu_registry import MenuRegistry
+
 
 class PluginManager:
     def __init__(self, config_manager=None):
         self.plugins = {}
         self.plugin_configs = {}
         self._config_manager = config_manager
+        # 统一状态接口：插件通过此回调向框架汇报自身状态
+        self._status_callback = None
+        # 保存每个插件最新上报的状态文本
+        self._plugin_status = {}
 
     def load_plugins(self, plugin_configs, config_manager=None):
         if config_manager:
@@ -56,3 +62,57 @@ class PluginManager:
             if name in self.plugins:
                 del self.plugins[name]
             self.load_plugin(config)
+
+    # ========== 统一状态接口 ==========
+    def set_status_callback(self, callback):
+        """设置状态更新回调，由 MainWindow 注册
+
+        Args:
+            callback: 回调函数，签名 callback(plugin_name: str, status_text: str)
+        """
+        self._status_callback = callback
+
+    def set_tool_status(self, plugin_name, status_text):
+        """工具插件通过此接口更新自身状态
+
+        Args:
+            plugin_name: 插件名称
+            status_text: 状态文本
+        """
+        self._plugin_status[plugin_name] = status_text
+        if self._status_callback:
+            self._status_callback(plugin_name, status_text)
+
+    def get_tool_status(self, plugin_name):
+        """获取指定插件的最新状态文本"""
+        return self._plugin_status.get(plugin_name, '')
+
+    def clear_tool_status(self, plugin_name):
+        """清除指定插件的状态文本"""
+        self._plugin_status.pop(plugin_name, None)
+        if self._status_callback:
+            self._status_callback(plugin_name, '')
+
+    # ========== 菜单注册接口 ==========
+    def collect_plugin_menus(self):
+        """收集所有插件注册的菜单定义。
+
+        遍历所有已加载插件，调用其 ``register_menus(registry)`` 方法（若存在），
+        插件通过 registry 注册自身的菜单项。最终返回一个包含所有菜单定义的列表。
+
+        Returns:
+            list[dict]: 菜单定义列表，每项为
+            ``{'plugin_name': str, 'title': str, 'items': [...]}``。
+            按插件加载顺序排列。
+        """
+        registry = MenuRegistry()
+        for plugin_name in self.plugins:
+            plugin = self.plugins[plugin_name]
+            register_fn = getattr(plugin, 'register_menus', None)
+            if register_fn is None:
+                continue
+            try:
+                register_fn(registry)
+            except Exception as e:
+                print(f"Failed to collect menus from plugin {plugin_name}: {e}")
+        return registry.get_menus()

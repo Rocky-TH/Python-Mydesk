@@ -19,8 +19,8 @@ class ANSIParser:
     # ANSI颜色代码映射（使用缓存）
     _color_cache = {}
 
-    # ANSI颜色代码映射
-    COLOR_MAP = {
+    # 深色主题ANSI颜色代码映射（浅色文字在深色背景上可见）
+    COLOR_MAP_DARK = {
         30: QColor(0, 0, 0),           # 黑色
         31: QColor(205, 0, 0),         # 红色
         32: QColor(0, 205, 0),         # 绿色
@@ -39,8 +39,29 @@ class ANSIParser:
         97: QColor(255, 255, 255),     # 亮白
     }
 
-    # 背景色代码映射
-    BG_COLOR_MAP = {
+    # 浅色主题ANSI颜色代码映射（加深浅色文字，使其在浅色背景上可见）
+    # 关键变化：白色(37/97)映射为深色，黄色/亮绿/亮青等加深
+    COLOR_MAP_LIGHT = {
+        30: QColor(0, 0, 0),           # 黑色（深色背景上可见）
+        31: QColor(205, 0, 0),         # 红色
+        32: QColor(0, 152, 0),         # 绿色（加深）
+        33: QColor(153, 102, 0),       # 黄色（加深为琥珀色）
+        34: QColor(0, 0, 238),         # 蓝色
+        35: QColor(205, 0, 205),       # 品红
+        36: QColor(0, 120, 152),       # 青色（加深）
+        37: QColor(85, 85, 85),        # 白色→深灰色（关键：浅色背景上可见）
+        90: QColor(118, 118, 118),     # 亮黑（灰色）
+        91: QColor(205, 49, 49),       # 亮红（加深）
+        92: QColor(9, 134, 88),        # 亮绿（加深）
+        93: QColor(153, 102, 0),       # 亮黄（加深为琥珀色）
+        94: QColor(4, 81, 165),        # 亮蓝（加深）
+        95: QColor(188, 5, 188),       # 亮品红（加深）
+        96: QColor(5, 152, 188),       # 亮青（加深）
+        97: QColor(30, 30, 30),        # 亮白→近黑色（关键：浅色背景上可见）
+    }
+
+    # 深色主题背景色代码映射
+    BG_COLOR_MAP_DARK = {
         40: QColor(0, 0, 0),           # 黑色背景
         41: QColor(205, 0, 0),         # 红色背景
         42: QColor(0, 205, 0),         # 绿色背景
@@ -59,18 +80,57 @@ class ANSIParser:
         107: QColor(255, 255, 255),    # 亮白背景
     }
 
-    def __init__(self, enable_color=False):
+    # 浅色主题背景色代码映射（黑色背景反转为浅色，白色背景保持）
+    BG_COLOR_MAP_LIGHT = {
+        40: QColor(85, 85, 85),        # 黑色背景→深灰色（浅色主题上可见）
+        41: QColor(205, 0, 0),         # 红色背景
+        42: QColor(0, 152, 0),         # 绿色背景（加深）
+        43: QColor(153, 102, 0),       # 黄色背景（加深）
+        44: QColor(0, 0, 238),         # 蓝色背景
+        45: QColor(205, 0, 205),       # 品红背景
+        46: QColor(0, 120, 152),       # 青色背景（加深）
+        47: QColor(229, 229, 229),     # 白色背景（保持浅色）
+        100: QColor(118, 118, 118),    # 亮黑背景
+        101: QColor(205, 49, 49),      # 亮红背景（加深）
+        102: QColor(9, 134, 88),       # 亮绿背景（加深）
+        103: QColor(153, 102, 0),      # 亮黄背景（加深）
+        104: QColor(4, 81, 165),       # 亮蓝背景（加深）
+        105: QColor(188, 5, 188),      # 亮品红背景（加深）
+        106: QColor(5, 152, 188),      # 亮青背景（加深）
+        107: QColor(245, 245, 245),    # 亮白背景（保持浅色）
+    }
+
+    # 向后兼容：默认使用深色主题颜色映射
+    COLOR_MAP = COLOR_MAP_DARK
+    BG_COLOR_MAP = BG_COLOR_MAP_DARK
+
+    def __init__(self, enable_color=False, default_foreground=None, is_dark=True):
         self.current_format = QTextCharFormat()
-        self.default_foreground = QColor(204, 204, 204)  # #cccccc
-        self.default_background = QColor(30, 30, 30)     # #1e1e1e (与主题一致)
+        self.default_foreground = default_foreground or QColor(204, 204, 204)
+        self.default_background = QColor(30, 30, 30)
         self.enable_color = enable_color
+        self.is_dark = is_dark
+        self._update_color_maps()
         self.reset_format()
 
+    def _update_color_maps(self):
+        """根据主题模式更新颜色映射（实例级别，不影响类常量）"""
+        if self.is_dark:
+            self.color_map = self.COLOR_MAP_DARK
+            self.bg_color_map = self.BG_COLOR_MAP_DARK
+        else:
+            self.color_map = self.COLOR_MAP_LIGHT
+            self.bg_color_map = self.BG_COLOR_MAP_LIGHT
+
+    def set_theme_mode(self, is_dark):
+        """切换主题模式并更新颜色映射"""
+        self.is_dark = is_dark
+        self._update_color_maps()
+
     def reset_format(self):
-        """重置格式为默认值"""
+        """重置格式为默认值（不设置背景色，使用控件透明背景）"""
         self.current_format = QTextCharFormat()
         self.current_format.setForeground(self.default_foreground)
-        self.current_format.setBackground(self.default_background)
 
     def parse_fast(self, text):
         """快速解析：仅提取纯文本，忽略ANSI序列（用于大量输出）"""
@@ -164,15 +224,15 @@ class ANSIParser:
                     # 取消下划线
                     self.current_format.setFontUnderline(False)
                 elif code == 27:
-                    # 取消反色
+                    # 取消反色（仅恢复前景色，不设置背景色）
                     self.current_format.setForeground(self.default_foreground)
-                    self.current_format.setBackground(self.default_background)
-                elif code in self.COLOR_MAP:
+                    self.current_format.clearBackground()
+                elif code in self.color_map:
                     # 前景色
-                    self.current_format.setForeground(self.COLOR_MAP[code])
-                elif code in self.BG_COLOR_MAP:
+                    self.current_format.setForeground(self.color_map[code])
+                elif code in self.bg_color_map:
                     # 背景色
-                    self.current_format.setBackground(self.BG_COLOR_MAP[code])
+                    self.current_format.setBackground(self.bg_color_map[code])
         
         # OSC 序列 (\x1b]...) - 用于设置窗口标题等，直接忽略
         elif ansi_code.startswith('\x1b]'):

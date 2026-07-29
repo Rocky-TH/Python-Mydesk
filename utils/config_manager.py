@@ -464,13 +464,18 @@ class ConfigManager:
     
     def _validate_font_size(self, value: str, default: str = '12px') -> str:
         """验证字体大小值是否有效"""
+        SAFE_DEFAULT = '12px'
         if not value or not isinstance(value, str):
-            return default
+            return SAFE_DEFAULT
         import re
         match = re.match(r'^(\d+)(px|pt|em)?$', value.strip())
         if match and int(match.group(1)) > 0:
             return value
-        return default
+        # 如果 default 本身也非法，回退到安全默认值
+        default_match = re.match(r'^(\d+)(px|pt|em)?$', str(default).strip()) if default else None
+        if default_match and int(default_match.group(1)) > 0:
+            return default
+        return SAFE_DEFAULT
     
     def get_border_radius(self, key: str, default: str = '4px') -> str:
         """获取边框圆角配置（支持新格式和旧格式）"""
@@ -505,6 +510,115 @@ class ConfigManager:
         if isinstance(value, str):
             return self.resolve_style_value(value)
         return value
+    
+    def get_button_css(self, button_type: str = 'button') -> str:
+        """获取按钮的完整 CSS 样式字符串
+        
+        Args:
+            button_type: 按钮类型，支持:
+                - 'button': 标准按钮（蓝色背景、白色字体）
+                - 'button-secondary': 次要按钮
+                - 'button-function': 功能按钮（蓝色背景、白色字体）
+                - 'button-success': 成功按钮（绿色背景、白色字体）
+                - 'button-danger': 危险按钮（红色背景、白色字体）
+                - 'button-calc-number': 计算器数字按钮
+                - 'button-calc-function': 计算器功能按钮（蓝色背景、白色字体）
+                - 'button-calc-equals': 计算器等号按钮（蓝色背景、白色字体）
+                - 'button-calc-clear': 计算器清除按钮（红色背景、白色字体）
+        
+        Returns:
+            QPushButton 的 CSS 样式字符串
+        """
+        style = self.get_component_style(button_type)
+        if not style:
+            # 默认蓝色背景、白色字体
+            style = self.get_component_style('button')
+        
+        bg = self.resolve_style_value(style.get('bg', '@primary'))
+        color = self.resolve_style_value(style.get('color', '#ffffff'))
+        border = self.resolve_style_value(style.get('border', 'none'))
+        padding = self.resolve_style_value(style.get('padding', '8px 16px'))
+        radius = self.resolve_style_value(style.get('radius', '@radius.md'))
+        font_size = self.resolve_style_value(style.get('font-size', '@fonts.size-md'))
+        font_weight = self.resolve_style_value(style.get('font-weight', '@fonts.weight-bold'))
+        hover_bg = self.resolve_style_value(style.get('hover-bg', '@primary-hover'))
+        pressed_bg = self.resolve_style_value(style.get('pressed-bg', '@primary-pressed'))
+        
+        css = f"""
+            QPushButton {{
+                background-color: {bg};
+                color: {color};
+                border: {border};
+                border-radius: {radius};
+                padding: {padding};
+                font-size: {font_size};
+                font-weight: {font_weight};
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+            QPushButton:pressed {{
+                background-color: {pressed_bg};
+            }}
+        """
+        return css
+
+    def get_menu_css(self) -> str:
+        """获取菜单的统一 CSS 样式字符串（悬停/选中时字体为白色）
+        
+        Returns:
+            QMenu 的 CSS 样式字符串
+        """
+        style = self.get_component_style('menu')
+        if not style:
+            style = {
+                'bg': '#2d2d30',
+                'color': '#ffffff',
+                'border': '1px solid #4a4a4d',
+                'radius': '6px',
+                'padding': '4px',
+                'item-padding': '6px 24px',
+                'item-selected-bg': '#007acc',
+                'item-selected-color': '#ffffff',
+                'separator-bg': '#4a4a4d',
+                'separator-height': '1px'
+            }
+        
+        bg = self.resolve_style_value(style.get('bg', '@bg-tertiary'))
+        color = self.resolve_style_value(style.get('color', '@text'))
+        border = self.resolve_style_value(style.get('border', '1px solid @border-light'))
+        radius = self.resolve_style_value(style.get('radius', '@radius.md'))
+        padding = self.resolve_style_value(style.get('padding', '4px'))
+        item_padding = self.resolve_style_value(style.get('item-padding', '6px 24px'))
+        item_selected_bg = self.resolve_style_value(style.get('item-selected-bg', '@primary'))
+        item_selected_color = self.resolve_style_value(style.get('item-selected-color', '#ffffff'))
+        separator_bg = self.resolve_style_value(style.get('separator-bg', '@border-light'))
+        separator_height = self.resolve_style_value(style.get('separator-height', '1px'))
+        
+        css = f"""
+            QMenu {{
+                background-color: {bg};
+                color: {color};
+                border: {border};
+                border-radius: {radius};
+                padding: {padding};
+            }}
+            QMenu::item {{
+                padding: {item_padding};
+                min-width: 100px;
+                color: {color};
+            }}
+            QMenu::item:selected {{
+                background-color: {item_selected_bg};
+                color: {item_selected_color};
+            }}
+            QMenu::separator {{
+                height: {separator_height};
+                background-color: {separator_bg};
+                margin: 4px 0;
+            }}
+        """
+        return css
     
     def resolve_style_value(self, value: str) -> str:
         """解析样式值中的变量引用，支持两种格式：${xxx} 和 @xxx"""
@@ -575,13 +689,53 @@ class ConfigManager:
             key = '.'.join(key_parts)
             
             if category == 'color_scheme':
-                return self.get_color(key, var_path)
+                # 颜色找不到时返回黑色，避免传入 var_path 这种非法值
+                return self.get_color(key, '#000000')
             elif category == 'font_sizes':
-                return self.get_font_size(key, var_path)
+                # 字体大小找不到时返回 12px，避免传入 var_path 这种非法值
+                return self.get_font_size(key, '12px')
             elif category == 'border_radius':
-                return self.get_border_radius(key, var_path)
+                # 圆角找不到时返回 4px，避免传入 var_path 这种非法值
+                return self.get_border_radius(key, '4px')
         
         return var_path
+
+    def get_app_config(self) -> Dict[str, Any]:
+        """获取应用配置（包含图标等全局设置）"""
+        return self._main_config.get('app_config', {})
+    
+    def get_app_icon(self) -> str:
+        """获取应用图标路径
+        
+        Returns:
+            图标文件的绝对路径，如果未配置则返回空字符串
+        """
+        app_config = self.get_app_config()
+        icon_path = app_config.get('icon', '')
+        
+        if not icon_path:
+            return ''
+        
+        # 如果是相对路径，转换为绝对路径（相对于项目根目录）
+        if not os.path.isabs(icon_path):
+            project_root = os.path.dirname(self._config_dir) if self._config_dir else ''
+            icon_path = os.path.join(project_root, icon_path)
+        
+        # 检查文件是否存在
+        if os.path.exists(icon_path):
+            return icon_path
+        return ''
+    
+    def set_app_icon(self, icon_path: str) -> None:
+        """设置应用图标配置
+        
+        Args:
+            icon_path: 图标文件路径（可以是相对路径或绝对路径）
+        """
+        if 'app_config' not in self._main_config:
+            self._main_config['app_config'] = {}
+        self._main_config['app_config']['icon'] = icon_path
+        self.save_main_config()
 
     @staticmethod
     def get_default_config_dir() -> str:

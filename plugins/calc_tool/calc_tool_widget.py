@@ -1,14 +1,13 @@
-import json
 import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit,
-    QComboBox, QGroupBox, QMessageBox, QCheckBox,
-    QTabWidget, QSpinBox, QPlainTextEdit,
-    QSplitter, QSizePolicy
+    QComboBox, QGroupBox, QMessageBox,
+    QSplitter, QSizePolicy, QPlainTextEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont, QFontMetrics, QTextDocument
+import os
 
 # 下拉框三角形箭头图片路径
 _DOWN_ARROW_IMG = os.path.join(
@@ -17,7 +16,154 @@ _DOWN_ARROW_IMG = os.path.join(
 ).replace('\\', '/')
 
 
-class QuicklyCmdPlugin:
+class AutoResizeTextEdit(QPlainTextEdit):
+    """支持自动换行和自动加高的多行文本输入框
+
+    - 开启自动换行（WordWrap），内容超出宽度时自动折行显示
+    - 内容行数增加时直接扩展控件高度，无滚动条，完整显示所有内容
+    - 支持 sync_group 同步：同一组内的控件自动保持相同高度
+    - 使用 QTimer 防抖，避免快速输入时频繁计算高度
+    - 重用 QTextDocument 实例，避免重复创建开销
+    - 提供 text()/setText() 兼容方法，可直接替换 QLineEdit
+    """
+
+    height_changed = pyqtSignal()
+
+    def __init__(self, min_height=30, parent=None):
+        super().__init__(parent)
+        self._min_height = min_height
+        self._needed_height = min_height
+        self._sync_group = None
+        # 组级别同步锁，所有组成员共享同一个标志（首次同步时初始化）
+        self._group_sync_active = False
+
+        # 重用的 QTextDocument（避免每次 resize 都重新创建）
+        self._layout_doc = QTextDocument()
+        self._layout_doc.setDefaultFont(self.font())
+
+        # 防抖定时器：合并快速连续的文本变化
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(30)  # 30ms 防抖
+        self._resize_timer.timeout.connect(self._do_auto_resize)
+
+        # 开启自动换行
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        # 滚动条始终隐藏，通过扩展高度来显示全部内容
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 大小策略：水平扩展，垂直固定（由内容决定高度）
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # 最小高度
+        self.setMinimumHeight(min_height)
+        # 去除默认边距，使外观接近 QLineEdit
+        self.setContentsMargins(0, 0, 0, 0)
+
+        # 内容变化时触发防抖 resize
+        self.textChanged.connect(self._schedule_resize)
+
+    def set_sync_group(self, widgets):
+        """设置同步组：当本控件高度变化时，组内所有控件同步为最大高度"""
+        self._sync_group = widgets
+
+    def _schedule_resize(self):
+        """防抖：延迟执行 resize，合并快速连续的文本变化"""
+        self._resize_timer.start()
+
+    def _do_auto_resize(self):
+        """实际执行高度计算（由定时器触发，避免频繁调用）"""
+        self._auto_resize()
+
+    def _auto_resize(self):
+        """根据内容实际显示高度（含自动换行）自动调整控件高度
+
+        使用重用的 QTextDocument 实例计算文本渲染高度。
+        组级别同步锁防止递归。
+        """
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            self._needed_height = self._min_height
+            return
+
+        text = self.toPlainText()
+
+        # 使用重用的 QTextDocument 计算高度（避免每次都创建新对象）
+        self._layout_doc.setPlainText(text)
+        self._layout_doc.setTextWidth(viewport_width)
+        doc_height = int(self._layout_doc.size().height())
+        doc_margin = int(self._layout_doc.documentMargin())
+        total_height = doc_height + doc_margin * 2 + 2
+
+        self._needed_height = max(self._min_height, total_height)
+
+        # 只在非同步状态下设置自身高度
+        if not self._group_sync_active:
+            self.setFixedHeight(self._needed_height)
+            self.height_changed.emit()
+            # 触发组同步
+            if self._sync_group:
+                self._sync_group_heights()
+
+    def _sync_group_heights(self):
+        """同步组内所有控件高度为最大值（组级别锁防止递归）"""
+        if not self._sync_group:
+            return
+        # 组级别锁：检查所有成员的 _group_sync_active
+        if any(getattr(w, '_group_sync_active', False) for w in self._sync_group):
+            return
+        # 设置所有成员的锁
+        for w in self._sync_group:
+            w._group_sync_active = True
+        try:
+            max_h = max(w._needed_height for w in self._sync_group)
+            for w in self._sync_group:
+                if w.height() != max_h:
+                    w.setFixedHeight(max_h)
+        finally:
+            for w in self._sync_group:
+                w._group_sync_active = False
+
+    def text(self):
+        """兼容 QLineEdit.text()"""
+        return self.toPlainText()
+
+    def setText(self, text):
+        """兼容 QLineEdit.setText()，即使信号被阻塞也会调整高度"""
+        self.setPlainText(text)
+        # 立即计算高度（不等防抖定时器），但不触发同步（由调用方统一处理）
+        self._calc_height_only()
+        self._sync_group_heights()
+
+    def clear(self):
+        """兼容 QLineEdit.clear()，清空后重置高度"""
+        super().clear()
+        self._calc_height_only()
+        self._sync_group_heights()
+
+    def _calc_height_only(self):
+        """仅计算所需高度，不设置控件高度也不触发同步（供 setText/clear 内部使用）"""
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            self._needed_height = self._min_height
+            return
+        text = self.toPlainText()
+        self._layout_doc.setPlainText(text)
+        self._layout_doc.setTextWidth(viewport_width)
+        doc_height = int(self._layout_doc.size().height())
+        doc_margin = int(self._layout_doc.documentMargin())
+        self._needed_height = max(self._min_height, doc_height + doc_margin * 2 + 2)
+
+    def resizeEvent(self, event):
+        """控件宽度变化时重新计算高度"""
+        super().resizeEvent(event)
+        # 宽度变化时延迟重算（避免 resize 循环）
+        if not self._group_sync_active:
+            self._resize_timer.start()
+
+
+class CalcToolPlugin:
+    """计算工具插件 - 提供计算器和数制转换功能"""
+
     def __init__(self, config, config_manager=None, plugin_manager=None):
         self.config = config
         self._config_manager = config_manager
@@ -28,7 +174,7 @@ class QuicklyCmdPlugin:
 
     def get_widget(self):
         if self.widget is None:
-            self.widget = QuicklyCmdWidget(self.config, self._config_manager, self._plugin_manager)
+            self.widget = CalcToolWidget(self.config, self._config_manager, self._plugin_manager)
         return self.widget
 
     def activate(self):
@@ -38,74 +184,121 @@ class QuicklyCmdPlugin:
         pass
 
 
-class QuicklyCmdWidget(QWidget):
-    """快捷命令插件 - 包含编译工具和字节转换工具"""
+class CalcToolWidget(QWidget):
+    """计算工具主组件 - 左侧计算器 + 右侧数值/字符串转换"""
 
     def __init__(self, config=None, config_manager=None, plugin_manager=None, parent=None):
         super().__init__(parent)
         self.config = config or {}
         self._config_manager = config_manager
         self._plugin_manager = plugin_manager
-        self._remote_cmd_plugin = None
-        self._current_connection = None
-        self.compile_config = self.load_compile_config()
         self.init_ui()
-
-    def _get_remote_cmd_plugin(self):
-        """获取 RemoteCmd 插件实例"""
-        if not self._remote_cmd_plugin and self._plugin_manager:
-            self._remote_cmd_plugin = self._plugin_manager.get_plugin("RemoteCmd")
-        return self._remote_cmd_plugin
-
-    def load_compile_config(self):
-        """加载编译配置"""
-        if self._config_manager:
-            plugin_config = self._config_manager.get_plugin_config("QuicklyCmd")
-            if plugin_config:
-                return plugin_config.get('compile', {})
-        
-        return {
-            "compile_environments": [{"name": "本地环境", "server": "localhost", "path": ".", "docker": None, "script": ""}],
-            "compile_components": [{"name": "全部组件", "targets": ["all"], "script": ""}],
-            "test_environments": [{"name": "单元测试", "type": "unit", "command": "pytest", "script": ""}]
-        }
+        # 启用键盘输入：设置焦点策略，使计算工具面板可接收键盘事件
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def get_style(self, key, default=None):
-        """获取样式配置（支持新旧两种格式）"""
         if self._config_manager:
             return self._config_manager.get_color(key, default)
         return default
 
+    def keyPressEvent(self, event):
+        """键盘输入支持：映射键盘按键到计算器操作"""
+        # 如果焦点在输入框（如数制转换的输入框）上，不拦截键盘事件
+        from PyQt6.QtWidgets import QLineEdit, QComboBox
+        focused = self.focusWidget()
+        if isinstance(focused, (QLineEdit, QComboBox)):
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        text = event.text()
+
+        # 数字输入 0-9
+        if key in (Qt.Key.Key_0, Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3,
+                   Qt.Key.Key_4, Qt.Key.Key_5, Qt.Key.Key_6, Qt.Key.Key_7,
+                   Qt.Key.Key_8, Qt.Key.Key_9):
+            self._on_calc_input(text)
+            return
+
+        # 十六进制输入 A-F（程序员模式）
+        if self.calc_mode_combo.currentIndex() == 1 and text.upper() in "ABCDEF":
+            self._on_calc_input(text.upper())
+            return
+
+        # 小数点
+        if key == Qt.Key.Key_Period:
+            self._on_calc_input('.')
+            return
+
+        # 运算符
+        if key == Qt.Key.Key_Plus:
+            self._on_calc_operator('+')
+            return
+        if key == Qt.Key.Key_Minus:
+            self._on_calc_operator('-')
+            return
+        if key == Qt.Key.Key_Asterisk:
+            self._on_calc_operator('*')
+            return
+        if key == Qt.Key.Key_Slash:
+            self._on_calc_operator('/')
+            return
+        if key == Qt.Key.Key_Percent:
+            self._on_calc_operator('%')
+            return
+
+        # 程序员模式位运算符
+        if self.calc_mode_combo.currentIndex() == 1:
+            if key == Qt.Key.Key_Ampersand:
+                self._on_calc_operator('&')
+                return
+            if key == Qt.Key.Key_Bar:
+                self._on_calc_operator('|')
+                return
+            if key == Qt.Key.Key_AsciiCircum:
+                self._on_calc_operator('^')
+                return
+            if key == Qt.Key.Key_Less:
+                self._on_calc_operator('<<')
+                return
+            if key == Qt.Key.Key_Greater:
+                self._on_calc_operator('>>')
+                return
+
+        # 等号 / Enter / Return
+        if key in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Equal):
+            self._on_calc_equals()
+            return
+
+        # Esc 清除
+        if key == Qt.Key.Key_Escape:
+            self._on_calc_clear()
+            return
+
+        # Backspace 退格
+        if key == Qt.Key.Key_Backspace:
+            self._on_calc_backspace()
+            return
+
+        # 其他按键交给父类处理
+        super().keyPressEvent(event)
+
     def get_font_size(self, key, default='12px'):
-        """获取字体大小"""
         if self._config_manager:
             return self._config_manager.get_font_size(key, default)
         return default
 
     def get_border_radius(self, key, default='4px'):
-        """获取边框圆角"""
         if self._config_manager:
             return self._config_manager.get_border_radius(key, default)
         return default
 
     def get_button_css(self, button_type='button'):
-        """获取按钮的统一 CSS 样式
-        
-        Args:
-            button_type: 按钮类型
-                - 'button': 标准按钮（蓝色背景、白色字体）
-                - 'button-function': 功能按钮（蓝色背景、白色字体）
-                - 'button-calc-number': 计算器数字按钮
-                - 'button-calc-function': 计算器功能按钮（蓝色背景、白色字体）
-                - 'button-calc-equals': 计算器等号按钮（蓝色背景、白色字体）
-                - 'button-calc-clear': 计算器清除按钮（红色背景、白色字体）
-        """
         if self._config_manager:
             return self._config_manager.get_button_css(button_type)
-        # 默认蓝色背景、白色字体
         return f"""
             QPushButton {{
-                background-color: #1976d2;
+                background-color: #3a8fd4;
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
@@ -114,15 +307,14 @@ class QuicklyCmdWidget(QWidget):
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: #1565c0;
+                background-color: #4a9fe4;
             }}
             QPushButton:pressed {{
-                background-color: #0d47a1;
+                background-color: #2a7fc4;
             }}
         """
 
     def get_menu_css(self):
-        """获取统一菜单 CSS 样式（悬停/选中时字体为白色）"""
         if self._config_manager:
             return self._config_manager.get_menu_css()
         primary = self.get_style('primary', '#007acc')
@@ -153,89 +345,43 @@ class QuicklyCmdWidget(QWidget):
             }}
         """
 
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-
-        self.tool_tabs = QTabWidget()
-        tab_style = self._get_tab_widget_style()
-        self.tool_tabs.setStyleSheet(tab_style)
-        layout.addWidget(self.tool_tabs)
-
-        compile_tab = self.create_compile_tool()
-        self.tool_tabs.addTab(compile_tab, "编译工具")
-
-        calc_tab = self.create_calculator_tool()
-        self.tool_tabs.addTab(calc_tab, "计算工具")
-
-    def _get_tab_widget_style(self):
-        """生成标签页样式"""
-        primary = self.get_style('primary', '#007acc')
-        bg_main = self.get_style('bg-main', '#1e1e1e')
-        bg_tertiary = self.get_style('bg-tertiary', '#2d2d30')
-        border = self.get_style('border', '#3d3d40')
-        text_primary = self.get_style('text', '#ffffff')
-        text_secondary = self.get_style('text-secondary', '#cccccc')
-        bg_input = self.get_style('bg-input', '#3c3c3c')
-        font_size = self.get_font_size('size-lg', '13px')
-        border_radius = self.get_border_radius('md', '6px')
-
-        return f"""
-            QTabWidget::pane {{
-                border: 1px solid {border};
-                background-color: {bg_main};
-            }}
-            QTabBar::tab {{
-                background-color: {bg_tertiary};
-                color: {text_secondary};
-                padding: 8px 20px;
-                border: 1px solid {border};
-                border-bottom: none;
-                margin-right: 2px;
-                margin-top: 4px;
-                border-top-left-radius: {border_radius};
-                border-top-right-radius: {border_radius};
-                font-size: {font_size};
-            }}
-            QTabBar::tab:selected {{
-                background-color: {primary};
-                color: {text_primary};
-                border-color: {primary};
-            }}
-            QTabBar::tab:hover:!selected {{
-                background-color: {bg_input};
-                color: {text_primary};
-            }}
-        """
+    def _get_button_style(self, type='primary'):
+        type_map = {
+            'primary': 'button',
+            'success': 'button',
+            'secondary': 'button-secondary',
+        }
+        button_type = type_map.get(type, 'button')
+        return self.get_button_css(button_type)
 
     def _get_group_box_style(self):
-        """生成GroupBox样式"""
         text_primary = self.get_style('text', '#ffffff')
         border_light = self.get_style('border-light', '#4a4a4d')
         border_radius = self.get_border_radius('lg', '8px')
         bg_secondary = self.get_style('bg-secondary', '#252526')
-        font_size = self.get_font_size('size-lg', '13px')
+        font_size = self.get_font_size('size-md', '12px')
 
         return f"""
             QGroupBox {{
                 color: {text_primary};
                 font-weight: bold;
                 font-size: {font_size};
-                border: 2px solid {border_light};
+                border: 1px solid {border_light};
                 border-radius: {border_radius};
-                margin-top: 12px;
-                padding-top: 15px;
+                margin-top: 8px;
+                padding-top: 10px;
                 background-color: {bg_secondary};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
-                left: 15px;
-                padding: 0 8px;
+                left: 10px;
+                padding: 0 6px;
+                color: {text_primary};
+                background-color: {bg_secondary};
             }}
         """
 
     def _get_combo_box_style(self):
-        """生成ComboBox样式"""
         bg_input = self.get_style('bg-input', '#3c3c3c')
         text_primary = self.get_style('text', '#ffffff')
         border_light = self.get_style('border-light', '#4a4a4d')
@@ -253,8 +399,8 @@ class QuicklyCmdWidget(QWidget):
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
-                padding: 6px 10px;
-                min-width: 200px;
+                padding: 4px 8px;
+                min-width: 120px;
                 border-radius: {border_radius};
                 font-size: {font_size};
             }}
@@ -284,7 +430,6 @@ class QuicklyCmdWidget(QWidget):
         """
 
     def _get_line_edit_style(self, read_only=False):
-        """生成LineEdit样式"""
         bg_input = self.get_style('bg-input', '#3c3c3c')
         text_primary = self.get_style('text', '#ffffff')
         border_light = self.get_style('border-light', '#4a4a4d')
@@ -297,356 +442,190 @@ class QuicklyCmdWidget(QWidget):
 
         if read_only:
             return f"""
-                QLineEdit {{
+                QLineEdit, QPlainTextEdit {{
                     background-color: {bg_main};
                     color: {text_success};
                     border: 1px solid {border_light};
-                    padding: 6px 10px;
+                    padding: 4px 8px;
                     border-radius: {border_radius};
                     font-size: {font_size};
                     font-family: Consolas;
                 }}
             """
-        
+
         return f"""
-            QLineEdit {{
+            QLineEdit, QPlainTextEdit {{
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
-                padding: 6px 10px;
+                padding: 4px 8px;
                 border-radius: {border_radius};
                 font-size: {font_size};
             }}
-            QLineEdit:focus {{
+            QLineEdit:focus, QPlainTextEdit:focus {{
                 border-color: {border_focus};
                 background-color: {bg_input_focus};
             }}
         """
 
-    def _get_button_style(self, type='primary'):
-        """生成按钮样式（统一使用蓝色背景+白色字体+加粗）"""
-        type_map = {
-            'primary': 'button',
-            'success': 'button',
-            'secondary': 'button-secondary',
-        }
-        button_type = type_map.get(type, 'button')
-        return self.get_button_css(button_type)
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(4)
 
-    def _get_plain_text_edit_style(self):
-        """生成PlainTextEdit样式"""
-        text_primary = self.get_style('text', '#2c3e50')
-        bg_main = self.get_style('bg-main', '#ffffff')
-        border = self.get_style('border', '#dcdfe6')
-        border_radius = self.get_border_radius('sm', '4px')
-        font_size = self.get_font_size('size-sm', '11px')
-
-        return f"""
-            QPlainTextEdit {{
-                background-color: {bg_main};
-                color: {text_primary};
-                border: 1px solid {border};
-                border-radius: {border_radius};
-                padding: 8px;
-                font-size: {font_size};
-                font-family: Consolas;
-            }}
-        """
-
-    def create_compile_tool(self):
-        """创建编译工具"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(15, 15, 15, 15)
-
-        options_group = QGroupBox("编译选项")
-        options_group.setStyleSheet(self._get_group_box_style())
-        options_layout = QFormLayout(options_group)
-        options_layout.setSpacing(10)
-
-        text_primary = self.get_style('text', '#ffffff')
-        font_size = self.get_font_size('size-md', '12px')
-
-        env_label = QLabel("编译环境:")
-        env_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        env_label.setFixedWidth(80)
-        env_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.compile_env_combo = QComboBox()
-        self.compile_env_combo.setStyleSheet(self._get_combo_box_style())
-        
-        for env in self.compile_config.get('compile_environments', []):
-            self.compile_env_combo.addItem(env['name'], env)
-        
-        options_layout.addRow(env_label, self.compile_env_combo)
-
-        comp_label = QLabel("编译组件:")
-        comp_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        comp_label.setFixedWidth(80)
-        comp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.compile_component_combo = QComboBox()
-        self.compile_component_combo.setStyleSheet(self._get_combo_box_style())
-        
-        for comp in self.compile_config.get('compile_components', []):
-            self.compile_component_combo.addItem(comp['name'], comp)
-        
-        options_layout.addRow(comp_label, self.compile_component_combo)
-
-        test_label = QLabel("测试环境:")
-        test_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        test_label.setFixedWidth(80)
-        test_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.test_env_combo = QComboBox()
-        self.test_env_combo.setStyleSheet(self._get_combo_box_style())
-        
-        for test in self.compile_config.get('test_environments', []):
-            self.test_env_combo.addItem(test['name'], test)
-        
-        options_layout.addRow(test_label, self.test_env_combo)
-
-        layout.addWidget(options_group)
-
-        detail_group = QGroupBox("当前配置详情")
-        detail_group.setStyleSheet(self._get_group_box_style())
-        detail_layout = QVBoxLayout(detail_group)
-
-        self.detail_text = QLabel("选择编译环境后显示详细配置信息")
-        text_success = self.get_style('text-success', '#00ff00')
-        font_size = self.get_font_size('size-md', '12px')
-        self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {font_size}; font-weight: 500;")
-        self.detail_text.setWordWrap(True)
-        self.detail_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        detail_layout.addWidget(self.detail_text)
-
-        layout.addWidget(detail_group)
-
-        self.compile_env_combo.currentIndexChanged.connect(self.update_detail_info)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        self.compile_btn = QPushButton("开始编译")
-        self.compile_btn.setFixedHeight(38)
-        self.compile_btn.setFixedWidth(160)
-        self.compile_btn.setStyleSheet(self._get_button_style('primary'))
-        self.compile_btn.clicked.connect(self.on_compile)
-        btn_layout.addWidget(self.compile_btn)
-
-        self.test_btn = QPushButton("运行测试")
-        self.test_btn.setFixedHeight(38)
-        self.test_btn.setFixedWidth(110)
-        self.test_btn.setStyleSheet(self._get_button_style('success'))
-        self.test_btn.clicked.connect(self.on_test)
-        btn_layout.addWidget(self.test_btn)
-
-        self.clean_btn = QPushButton("清理")
-        self.clean_btn.setFixedHeight(38)
-        self.clean_btn.setFixedWidth(90)
-        self.clean_btn.setStyleSheet(self._get_button_style('secondary'))
-        self.clean_btn.clicked.connect(self.on_clean)
-        btn_layout.addWidget(self.clean_btn)
-
-        layout.addLayout(btn_layout)
-
-        output_group = QGroupBox("编译输出")
-        output_group.setStyleSheet(self._get_group_box_style())
-        output_layout = QVBoxLayout(output_group)
-
-        self.compile_output = QPlainTextEdit()
-        self.compile_output.setFont(QFont("Consolas", 11))
-        self.compile_output.setReadOnly(True)
-        self.compile_output.setStyleSheet(self._get_plain_text_edit_style())
-        output_layout.addWidget(self.compile_output)
-
-        layout.addWidget(output_group)
-
-        self.status_bar = QWidget()
-        self.status_bar.setFixedHeight(30)
-        primary = self.get_style('primary', '#007acc')
-        self.status_bar.setStyleSheet(f"background-color: {primary}; border-radius: {self.get_border_radius('sm', '4px')};")
-        status_layout = QHBoxLayout(self.status_bar)
-        status_layout.setContentsMargins(10, 0, 10, 0)
-
-        self.status_label = QLabel("就绪")
-        self.status_label.setStyleSheet("color: white; font-weight: bold;")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_layout.addWidget(self.status_label)
-
-        status_layout.addStretch()
-
-        self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet("color: rgba(255,255,255,0.9);")
-        self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_layout.addWidget(self.progress_label)
-
-        layout.addWidget(self.status_bar)
-
-        self.update_detail_info()
-
-        return widget
-
-    def update_detail_info(self):
-        """更新配置详情显示，并自动连接到编译环境"""
-        env_data = self.compile_env_combo.currentData()
-        if env_data:
-            server = env_data.get('server', 'N/A')
-            path = env_data.get('path', 'N/A')
-            docker = env_data.get('docker', '无')
-            desc = env_data.get('description', '')
-            
-            info = f"服务器: {server} | 路径: {path} | Docker: {docker}"
-            if desc:
-                info += f"\n说明: {desc}"
-            
-            self.detail_text.setText(info)
-            text_success = self.get_style('text_success', '#00ff00')
-            self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {self.get_font_size('small', '11px')};")
-
-    def _auto_connect_and_discover_components(self, env_data):
-        """自动连接到编译环境并发现组件"""
-        remote_cmd = self._get_remote_cmd_plugin()
-        if not remote_cmd:
-            return
-        
-        env_name = env_data.get('name', '')
-        
-        if env_data.get('connection'):
-            self.detail_text.setText(self.detail_text.text() + "\n连接中...")
-            
-            success, msg = remote_cmd.connect(env_name)
-            if success:
-                text_success = self.get_style('text_success', '#00ff00')
-                self.detail_text.setText(self.detail_text.text() + f"\n{msg}")
-                self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {self.get_font_size('small', '11px')};")
-                self._current_connection = env_name
-                
-                path = env_data.get('path', '.')
-                self._discover_components(path)
-            else:
-                text_error = self.get_style('text_error', '#ff6b6b')
-                self.detail_text.setText(self.detail_text.text() + f"\n[连接失败] {msg}")
-                self.detail_text.setStyleSheet(f"color: {text_error}; font-size: {self.get_font_size('small', '11px')};")
-        else:
-            path = env_data.get('path', '.')
-            self._discover_components(path)
-
-    def _discover_components(self, path):
-        """发现当前路径下的编译组件"""
-        discovered_components = []
-        
-        script_dir = os.path.join(path, 'script')
-        make_rom_path = os.path.join(script_dir, 'make_rom.sh')
-        
-        if os.path.exists(make_rom_path):
-            component_name = os.path.basename(path)
-            discovered_components.append({
-                'name': component_name,
-                'targets': [component_name],
-                'description': f"基于 make_rom.sh 的 {component_name} 组件"
-            })
-        
-        component_dirs = ['support_components', 'functional_components', 'buiness_components']
-        for comp_dir in component_dirs:
-            full_path = os.path.join(path, comp_dir)
-            if os.path.isdir(full_path):
-                for item in os.listdir(full_path):
-                    item_path = os.path.join(full_path, item)
-                    if os.path.isdir(item_path):
-                        discovered_components.append({
-                            'name': item,
-                            'targets': [item],
-                            'description': f"{comp_dir} 下的 {item} 组件"
-                        })
-        
-        default_components = self.compile_config.get('compile_components', [])
-        
-        all_components = []
-        existing_names = set()
-        
-        for comp in default_components:
-            all_components.append(comp)
-            existing_names.add(comp['name'])
-        
-        for comp in discovered_components:
-            if comp['name'] not in existing_names:
-                all_components.append(comp)
-                existing_names.add(comp['name'])
-        
-        self.compile_component_combo.blockSignals(True)
-        self.compile_component_combo.clear()
-        for comp in all_components:
-            self.compile_component_combo.addItem(comp['name'], comp)
-        self.compile_component_combo.blockSignals(False)
-
-    def create_calculator_tool(self):
-        """创建计算工具（左侧计算器 + 右侧数值/字符串转换）"""
-        widget = QWidget()
-        main_layout = QHBoxLayout(widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setContentsMargins(0, 0, 0, 0)
-        
-        # 左侧：计算器
+
         calc_widget = self._create_calculator_panel()
         splitter.addWidget(calc_widget)
-        
-        # 右侧：数值转换 + 字符串转换
+
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(5, 5, 5, 5)
-        right_layout.setSpacing(5)
-        
+        right_layout.setContentsMargins(6, 0, 0, 0)
+        right_layout.setSpacing(10)
+
         convert_widget = self._create_number_convert_panel()
         right_layout.addWidget(convert_widget)
-        
+
         hex_str_widget = self._create_hex_string_panel()
         right_layout.addWidget(hex_str_widget)
-        
-        right_layout.addStretch()  # 让内容顶部对齐
-        
+
+        right_layout.addStretch()
+
         splitter.addWidget(right_widget)
-        
+
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([300, 600])
         splitter.setChildrenCollapsible(False)
-        
+
         main_layout.addWidget(splitter)
-        return widget
-    
+
+        # 保存需要刷新样式的控件引用
+        self._style_widgets = {
+            'calc_mode_combo': self.calc_mode_combo,
+            'calc_display': self.calc_display,
+            'calc_expression_display': self.calc_expression_display,
+            'dec_input': self.dec_input,
+            'bin_input': self.bin_input,
+            'hex_input': self.hex_input,
+            'hex_array_input': self.hex_array_input,
+            'string_input': self.string_input,
+            'prog_dec_value': self.prog_dec_value,
+            'prog_bin_value': self.prog_bin_value,
+            'prog_hex_value': self.prog_hex_value,
+        }
+
+    def refresh_theme_styles(self):
+        """刷新主题样式"""
+        if not hasattr(self, '_style_widgets'):
+            return
+        # 刷新各面板GroupBox样式
+        for widget in self.findChildren(QGroupBox):
+            widget.setStyleSheet(self._get_group_box_style())
+        # 刷新ComboBox
+        if 'calc_mode_combo' in self._style_widgets:
+            self._style_widgets['calc_mode_combo'].setStyleSheet(self._get_combo_box_style())
+        # 刷新LineEdit（普通输入框）
+        line_edit_style = self._get_line_edit_style()
+        for key in ['dec_input', 'bin_input', 'hex_input', 'hex_array_input', 'string_input']:
+            if key in self._style_widgets:
+                self._style_widgets[key].setStyleSheet(line_edit_style)
+        # 刷新只读LineEdit（程序员模式的结果显示框）
+        read_only_style = self._get_line_edit_style(read_only=True)
+        for key in ['prog_dec_value', 'prog_bin_value', 'prog_hex_value']:
+            if key in self._style_widgets:
+                self._style_widgets[key].setStyleSheet(read_only_style)
+        # 刷新显示框（使用 transparent 背景，由容器提供背景色）
+        if 'calc_display' in self._style_widgets:
+            text_primary = self.get_style('text', '#e0e0e0')
+            self._style_widgets['calc_display'].setStyleSheet(f"""
+                QLineEdit {{
+                    background-color: transparent;
+                    color: {text_primary};
+                    border: none;
+                    font-size: 20px;
+                    font-weight: bold;
+                    font-family: Consolas;
+                    padding: 0px;
+                }}
+            """)
+        if 'calc_expression_display' in self._style_widgets:
+            text_secondary = self.get_style('text-secondary', '#b0b0b0')
+            self._style_widgets['calc_expression_display'].setStyleSheet(f"""
+                QLineEdit {{
+                    background-color: transparent;
+                    color: {text_secondary};
+                    border: none;
+                    font-size: 11px;
+                    font-family: Consolas;
+                    padding: 0px;
+                }}
+            """)
+        # 刷新显示框容器背景（使用主题 bg-input 变量）
+        bg_input = self.get_style('bg-input', '#454545')
+        border_style = self.get_style('border', '#3c3c3c')
+        border_radius = self.get_border_radius('md', '6px')
+        calc_display = self._style_widgets.get('calc_display')
+        if calc_display is not None:
+            container = calc_display.parent()
+            if container is not None and container is not self:
+                container.setStyleSheet(f"""
+                    QWidget {{
+                        background-color: {bg_input};
+                        border: 1px solid {border_style};
+                        border-radius: {border_radius};
+                    }}
+                """)
+        # 刷新按钮样式
+        btn_css = self.get_button_css('button-calc-number')
+        for btn in self.findChildren(QPushButton):
+            btn_type = btn.property('button_type')
+            if btn_type == 'function':
+                btn.setStyleSheet(self.get_button_css('button-calc-function'))
+            elif btn_type == 'equals':
+                btn.setStyleSheet(self.get_button_css('button-calc-equals'))
+            elif btn_type == 'clear':
+                btn.setStyleSheet(self.get_button_css('button-calc-clear'))
+            else:
+                btn.setStyleSheet(btn_css)
+        # 刷新所有标签样式（十进制、二进制、十六进制、模式等）
+        label_text = self.get_style('text', '#e0e0e0')
+        label_font = self.get_font_size('size-md', '12px')
+        label_style = f"color: {label_text}; font-size: {label_font}; font-weight: 500;"
+        for label in self.findChildren(QLabel):
+            label.setStyleSheet(label_style)
+
     def _create_calculator_panel(self):
-        """创建计算器面板"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(6)
-        
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
         text_primary = self.get_style('text', '#ffffff')
         font_size = self.get_font_size('size-md', '12px')
-        
-        # 模式切换
+
         mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(4)
         mode_label = QLabel("模式:")
         mode_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         mode_label.setFixedWidth(96)
         mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mode_layout.addWidget(mode_label)
-        
+
         self.calc_mode_combo = QComboBox()
         self.calc_mode_combo.addItems(["标准模式", "程序员模式"])
         self.calc_mode_combo.setStyleSheet(self._get_combo_box_style())
         self.calc_mode_combo.currentIndexChanged.connect(self._on_calc_mode_changed)
         mode_layout.addWidget(self.calc_mode_combo, 1)
         layout.addLayout(mode_layout)
-        
-        # 显示区 - 双行显示
-        bg_input = self.get_style('bg-input', '#ffffff')
-        text_primary_color = self.get_style('text', '#2c3e50')
-        text_secondary = self.get_style('text-secondary', '#5a6c7d')
-        border_style = self.get_style('border', '#dcdfe6')
+
+        bg_input = self.get_style('bg-input', '#454545')
+        text_primary_color = self.get_style('text', '#e0e0e0')
+        text_secondary = self.get_style('text-secondary', '#b0b0b0')
+        border_style = self.get_style('border', '#3c3c3c')
         border_radius = self.get_border_radius('md', '6px')
-        
+
         display_container = QWidget()
         display_container.setStyleSheet(f"""
             QWidget {{
@@ -656,49 +635,48 @@ class QuicklyCmdWidget(QWidget):
             }}
         """)
         display_layout = QVBoxLayout(display_container)
-        display_layout.setContentsMargins(10, 6, 10, 6)
-        display_layout.setSpacing(2)
-        
-        # 上排：输入表达式
+        display_layout.setContentsMargins(8, 4, 8, 4)
+        display_layout.setSpacing(1)
+
         self.calc_expression_display = QLineEdit()
         self.calc_expression_display.setReadOnly(True)
+        self.calc_expression_display.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.calc_expression_display.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.calc_expression_display.setStyleSheet(f"""
             QLineEdit {{
                 background-color: transparent;
                 color: {text_secondary};
                 border: none;
-                font-size: 12px;
+                font-size: 11px;
                 font-family: Consolas;
                 padding: 0px;
             }}
         """)
-        self.calc_expression_display.setFixedHeight(20)
+        self.calc_expression_display.setFixedHeight(16)
         self.calc_expression_display.setText("")
         display_layout.addWidget(self.calc_expression_display)
-        
-        # 下排：计算结果
+
         self.calc_display = QLineEdit()
         self.calc_display.setReadOnly(True)
+        self.calc_display.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.calc_display.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.calc_display.setStyleSheet(f"""
             QLineEdit {{
                 background-color: transparent;
                 color: {text_primary_color};
                 border: none;
-                font-size: 22px;
+                font-size: 20px;
                 font-weight: bold;
                 font-family: Consolas;
                 padding: 0px;
             }}
         """)
-        self.calc_display.setFixedHeight(32)
+        self.calc_display.setFixedHeight(28)
         self.calc_display.setText("0")
         display_layout.addWidget(self.calc_display)
-        
+
         layout.addWidget(display_container)
-        
-        # 程序员模式的进制显示
+
         self.programmer_display = QWidget()
         prog_layout = QFormLayout(self.programmer_display)
         prog_layout.setSpacing(4)
@@ -711,6 +689,7 @@ class QuicklyCmdWidget(QWidget):
         self.prog_dec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_dec_value = QLineEdit()
         self.prog_dec_value.setReadOnly(True)
+        self.prog_dec_value.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.prog_dec_value.setStyleSheet(self._get_line_edit_style(read_only=True))
         prog_layout.addRow(self.prog_dec_label, self.prog_dec_value)
 
@@ -720,6 +699,7 @@ class QuicklyCmdWidget(QWidget):
         self.prog_bin_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_bin_value = QLineEdit()
         self.prog_bin_value.setReadOnly(True)
+        self.prog_bin_value.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.prog_bin_value.setStyleSheet(self._get_line_edit_style(read_only=True))
         prog_layout.addRow(self.prog_bin_label, self.prog_bin_value)
 
@@ -729,129 +709,117 @@ class QuicklyCmdWidget(QWidget):
         self.prog_hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_hex_value = QLineEdit()
         self.prog_hex_value.setReadOnly(True)
+        self.prog_hex_value.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.prog_hex_value.setStyleSheet(self._get_line_edit_style(read_only=True))
         prog_layout.addRow(self.prog_hex_label, self.prog_hex_value)
-        
+
         self.programmer_display.hide()
         layout.addWidget(self.programmer_display)
-        
-        # 计算器按钮区
+
         self.calc_buttons_widget = QWidget()
         self.calc_buttons_layout = QVBoxLayout(self.calc_buttons_widget)
-        self.calc_buttons_layout.setSpacing(4)
+        self.calc_buttons_layout.setSpacing(3)
         self.calc_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self._init_standard_buttons()
         layout.addWidget(self.calc_buttons_widget)
-        
-        layout.addStretch()  # 让内容顶部对齐
-        
-        # 初始化计算器状态
+
+        layout.addStretch()
+
         self._calc_reset()
-        
+
         return panel
-    
+
     def _init_standard_buttons(self):
-        """初始化标准模式按钮 - 按使用习惯排列，使用统一按钮样式"""
         self._clear_buttons()
-        
-        # 使用统一的按钮 CSS 样式（蓝色背景、白色字体）
+
         num_btn_style = self.get_button_css('button-calc-number')
         fn_btn_style = self.get_button_css('button-calc-function')
         clear_btn_style = self.get_button_css('button-calc-clear')
         equals_btn_style = self.get_button_css('button-calc-equals')
-        
-        btn_height = 34
-        
-        # Row 1: % (功能), CE (清除), C (全清), ⌫ (退格)
+
+        btn_height = 28
+
         row1 = QHBoxLayout()
-        row1.setSpacing(4)
-        btn_pct = self._create_calc_btn("%", fn_btn_style, lambda: self._on_calc_operator("%"))
-        btn_ce = self._create_calc_btn("CE", clear_btn_style, self._on_calc_clear)
-        btn_c = self._create_calc_btn("C", clear_btn_style, self._on_calc_clear)
-        btn_back = self._create_calc_btn("⌫", fn_btn_style, self._on_calc_backspace)
+        row1.setSpacing(3)
+        btn_pct = self._create_calc_btn("%", fn_btn_style, lambda: self._on_calc_operator("%"), 'function')
+        btn_ce = self._create_calc_btn("CE", clear_btn_style, self._on_calc_clear, 'clear')
+        btn_c = self._create_calc_btn("C", clear_btn_style, self._on_calc_clear, 'clear')
+        btn_back = self._create_calc_btn("⌫", fn_btn_style, self._on_calc_backspace, 'function')
         for btn in [btn_pct, btn_ce, btn_c, btn_back]:
             btn.setFixedHeight(btn_height)
             row1.addWidget(btn)
         self.calc_buttons_layout.addLayout(row1)
-        
-        # Row 2: 1/x (功能), x² (功能), √x (功能), ÷ (运算)
+
         row2 = QHBoxLayout()
-        row2.setSpacing(4)
-        btn_recip = self._create_calc_btn("1/x", fn_btn_style, lambda: self._on_calc_reciprocal())
-        btn_sq = self._create_calc_btn("x²", fn_btn_style, lambda: self._on_calc_square())
-        btn_sqrt = self._create_calc_btn("√x", fn_btn_style, lambda: self._on_calc_sqrt())
-        btn_div = self._create_calc_btn("÷", fn_btn_style, lambda: self._on_calc_operator("/"))
+        row2.setSpacing(3)
+        btn_recip = self._create_calc_btn("1/x", fn_btn_style, lambda: self._on_calc_reciprocal(), 'function')
+        btn_sq = self._create_calc_btn("x²", fn_btn_style, lambda: self._on_calc_square(), 'function')
+        btn_sqrt = self._create_calc_btn("√x", fn_btn_style, lambda: self._on_calc_sqrt(), 'function')
+        btn_div = self._create_calc_btn("÷", fn_btn_style, lambda: self._on_calc_operator("/"), 'function')
         for btn in [btn_recip, btn_sq, btn_sqrt, btn_div]:
             btn.setFixedHeight(btn_height)
             row2.addWidget(btn)
         self.calc_buttons_layout.addLayout(row2)
-        
-        # Row 3: 7, 8, 9, ×
+
         row3 = QHBoxLayout()
-        row3.setSpacing(4)
-        btn_7 = self._create_calc_btn("7", num_btn_style, lambda: self._on_calc_input("7"))
-        btn_8 = self._create_calc_btn("8", num_btn_style, lambda: self._on_calc_input("8"))
-        btn_9 = self._create_calc_btn("9", num_btn_style, lambda: self._on_calc_input("9"))
-        btn_mul = self._create_calc_btn("×", fn_btn_style, lambda: self._on_calc_operator("*"))
+        row3.setSpacing(3)
+        btn_7 = self._create_calc_btn("7", num_btn_style, lambda: self._on_calc_input("7"), 'number')
+        btn_8 = self._create_calc_btn("8", num_btn_style, lambda: self._on_calc_input("8"), 'number')
+        btn_9 = self._create_calc_btn("9", num_btn_style, lambda: self._on_calc_input("9"), 'number')
+        btn_mul = self._create_calc_btn("×", fn_btn_style, lambda: self._on_calc_operator("*"), 'function')
         for btn in [btn_7, btn_8, btn_9, btn_mul]:
             btn.setFixedHeight(btn_height)
             row3.addWidget(btn)
         self.calc_buttons_layout.addLayout(row3)
-        
-        # Row 4: 4, 5, 6, −
+
         row4 = QHBoxLayout()
-        row4.setSpacing(4)
-        btn_4 = self._create_calc_btn("4", num_btn_style, lambda: self._on_calc_input("4"))
-        btn_5 = self._create_calc_btn("5", num_btn_style, lambda: self._on_calc_input("5"))
-        btn_6 = self._create_calc_btn("6", num_btn_style, lambda: self._on_calc_input("6"))
-        btn_sub = self._create_calc_btn("−", fn_btn_style, lambda: self._on_calc_operator("-"))
+        row4.setSpacing(3)
+        btn_4 = self._create_calc_btn("4", num_btn_style, lambda: self._on_calc_input("4"), 'number')
+        btn_5 = self._create_calc_btn("5", num_btn_style, lambda: self._on_calc_input("5"), 'number')
+        btn_6 = self._create_calc_btn("6", num_btn_style, lambda: self._on_calc_input("6"), 'number')
+        btn_sub = self._create_calc_btn("−", fn_btn_style, lambda: self._on_calc_operator("-"), 'function')
         for btn in [btn_4, btn_5, btn_6, btn_sub]:
             btn.setFixedHeight(btn_height)
             row4.addWidget(btn)
         self.calc_buttons_layout.addLayout(row4)
-        
-        # Row 5: 1, 2, 3, +
+
         row5 = QHBoxLayout()
-        row5.setSpacing(4)
-        btn_1 = self._create_calc_btn("1", num_btn_style, lambda: self._on_calc_input("1"))
-        btn_2 = self._create_calc_btn("2", num_btn_style, lambda: self._on_calc_input("2"))
-        btn_3 = self._create_calc_btn("3", num_btn_style, lambda: self._on_calc_input("3"))
-        btn_add = self._create_calc_btn("+", fn_btn_style, lambda: self._on_calc_operator("+"))
+        row5.setSpacing(3)
+        btn_1 = self._create_calc_btn("1", num_btn_style, lambda: self._on_calc_input("1"), 'number')
+        btn_2 = self._create_calc_btn("2", num_btn_style, lambda: self._on_calc_input("2"), 'number')
+        btn_3 = self._create_calc_btn("3", num_btn_style, lambda: self._on_calc_input("3"), 'number')
+        btn_add = self._create_calc_btn("+", fn_btn_style, lambda: self._on_calc_operator("+"), 'function')
         for btn in [btn_1, btn_2, btn_3, btn_add]:
             btn.setFixedHeight(btn_height)
             row5.addWidget(btn)
         self.calc_buttons_layout.addLayout(row5)
-        
-        # Row 6: 0 (双宽), ., = 
+
         row6 = QHBoxLayout()
-        row6.setSpacing(4)
-        btn_0 = self._create_calc_btn("0", num_btn_style, lambda: self._on_calc_input("0"))
+        row6.setSpacing(3)
+        btn_0 = self._create_calc_btn("0", num_btn_style, lambda: self._on_calc_input("0"), 'number')
         btn_0.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn_dot = self._create_calc_btn(".", num_btn_style, lambda: self._on_calc_input("."))
-        btn_eq = self._create_calc_btn("=", equals_btn_style, self._on_calc_equals)
+        btn_dot = self._create_calc_btn(".", num_btn_style, lambda: self._on_calc_input("."), 'number')
+        btn_eq = self._create_calc_btn("=", equals_btn_style, self._on_calc_equals, 'equals')
         btn_eq.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn_0.setFixedHeight(btn_height)
         btn_dot.setFixedHeight(btn_height)
         btn_eq.setFixedHeight(btn_height)
-        row6.addWidget(btn_0, 2)  # 0 占 2 份宽度
+        row6.addWidget(btn_0, 2)
         row6.addWidget(btn_dot, 1)
-        row6.addWidget(btn_eq, 2)  # = 占 2 份宽度
+        row6.addWidget(btn_eq, 2)
         self.calc_buttons_layout.addLayout(row6)
-    
+
     def _init_programmer_buttons(self):
-        """初始化程序员模式按钮 - 使用统一按钮样式"""
         self._clear_buttons()
-        
-        # 使用统一的按钮 CSS 样式（蓝色背景、白色字体）
+
         hex_btn_style = self.get_button_css('button-calc-number')
         func_btn_style = self.get_button_css('button-calc-function')
         clear_btn_style = self.get_button_css('button-calc-clear')
         equals_btn_style = self.get_button_css('button-calc-equals')
-        
-        btn_height = 30
-        
-        # Row 1: 位运算
+
+        btn_height = 26
+
         row1 = QHBoxLayout()
         row1.setSpacing(3)
         for text, handler in [("<<", lambda: self._on_calc_operator("<<")),
@@ -864,8 +832,7 @@ class QuicklyCmdWidget(QWidget):
             btn.setFixedHeight(btn_height)
             row1.addWidget(btn)
         self.calc_buttons_layout.addLayout(row1)
-        
-        # Row 2: C, Back, mod, /
+
         row2 = QHBoxLayout()
         row2.setSpacing(3)
         for text, handler, style in [("C", self._on_calc_clear, clear_btn_style),
@@ -876,8 +843,7 @@ class QuicklyCmdWidget(QWidget):
             btn.setFixedHeight(btn_height)
             row2.addWidget(btn)
         self.calc_buttons_layout.addLayout(row2)
-        
-        # Row 3: A, B, C, D, E, F
+
         row3 = QHBoxLayout()
         row3.setSpacing(3)
         for text, handler in [("A", lambda: self._on_calc_input("A")),
@@ -890,8 +856,7 @@ class QuicklyCmdWidget(QWidget):
             btn.setFixedHeight(btn_height)
             row3.addWidget(btn)
         self.calc_buttons_layout.addLayout(row3)
-        
-        # Row 4: 7, 8, 9, *, -
+
         row4 = QHBoxLayout()
         row4.setSpacing(3)
         for text, handler, style in [("7", lambda: self._on_calc_input("7"), hex_btn_style),
@@ -903,8 +868,7 @@ class QuicklyCmdWidget(QWidget):
             btn.setFixedHeight(btn_height)
             row4.addWidget(btn)
         self.calc_buttons_layout.addLayout(row4)
-        
-        # Row 5: 4, 5, 6, +
+
         row5 = QHBoxLayout()
         row5.setSpacing(3)
         for text, handler, style in [("4", lambda: self._on_calc_input("4"), hex_btn_style),
@@ -915,8 +879,7 @@ class QuicklyCmdWidget(QWidget):
             btn.setFixedHeight(btn_height)
             row5.addWidget(btn)
         self.calc_buttons_layout.addLayout(row5)
-        
-        # Row 6: 0, 1, 2, 3, =
+
         row6 = QHBoxLayout()
         row6.setSpacing(3)
         for text, handler, style in [("0", lambda: self._on_calc_input("0"), hex_btn_style),
@@ -928,46 +891,57 @@ class QuicklyCmdWidget(QWidget):
             btn.setFixedHeight(btn_height)
             row6.addWidget(btn)
         self.calc_buttons_layout.addLayout(row6)
-    
+
     def _clear_buttons(self):
-        """清除按钮布局"""
         while self.calc_buttons_layout.count():
             item = self.calc_buttons_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
             elif item.layout():
                 self._clear_layout(item.layout())
-    
+
     def _clear_layout(self, layout):
-        """递归清除布局"""
         while layout.count():
             item = layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
             elif item.layout():
                 self._clear_layout(item.layout())
-    
-    def _create_calc_btn(self, text, style, handler):
-        """创建计算器按钮"""
-        btn = QPushButton(text)
+
+    def _create_calc_btn(self, text, style, handler, button_type=None):
+        # 使用 "&&" 转义，避免 Qt 将 "&" 解析为快捷键前缀导致符号不显示
+        display_text = text.replace("&", "&&")
+        btn = QPushButton(display_text)
         btn.setStyleSheet(style)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.clicked.connect(handler)
+        # 保存真实文本用于后续判断
+        btn.setProperty('real_text', text)
+        # 如果未显式指定 button_type，则从 style 字符串中推断
+        if button_type is None:
+            if 'calc-clear' in style:
+                button_type = 'clear'
+            elif 'calc-equals' in style:
+                button_type = 'equals'
+            elif 'calc-function' in style:
+                button_type = 'function'
+            else:
+                button_type = 'number'
+        btn.setProperty('button_type', button_type)
         return btn
-    
+
     def _on_calc_mode_changed(self, index):
-        """计算器模式切换"""
         if index == 0:
-            # 标准模式
             self.programmer_display.hide()
             self._init_standard_buttons()
         else:
-            # 程序员模式
             self.programmer_display.show()
             self._init_programmer_buttons()
         self._calc_reset()
-    
+        # 切换模式后将焦点返回给计算工具面板，使键盘输入保持有效
+        self.setFocus()
+
     def _calc_reset(self):
-        """重置计算器"""
         self._calc_expression = ""
         self._calc_operand1 = None
         self._calc_operator = None
@@ -975,81 +949,73 @@ class QuicklyCmdWidget(QWidget):
         self.calc_display.setText("0")
         self.calc_expression_display.setText("")
         self._update_programmer_display(0)
-    
+
     def _on_calc_clear(self):
-        """清除计算器"""
         self._calc_reset()
-    
+
     def _on_calc_backspace(self):
-        """退格"""
         current = self.calc_display.text()
         if current and current != "0":
             new_text = current[:-1]
             self.calc_display.setText(new_text if new_text else "0")
             self._update_programmer_display(self._calc_parse_number(self.calc_display.text()))
-    
+
     def _on_calc_input(self, char):
-        """输入字符"""
         if not hasattr(self, '_calc_expression'):
             self._calc_reset()
-        
+
         current = self.calc_display.text()
-        
-        # 程序员模式只允许 0-9, A-F
+
         if self.calc_mode_combo.currentIndex() == 1:
             if char not in "0123456789ABCDEF":
                 return
-        
+
         if self._calc_waiting_for_operand2:
             current = ""
             self._calc_waiting_for_operand2 = False
-        
+
         if char == "." and "." in current:
             return
-        
+
         if current == "0" and char != ".":
             current = char
         elif current == "0" and char == ".":
             current = "0."
         else:
             current += char
-        
+
         self.calc_display.setText(current)
         self._update_programmer_display(self._calc_parse_number(current))
-    
+
     def _on_calc_operator(self, op):
-        """运算符"""
         if not hasattr(self, '_calc_expression'):
             self._calc_reset()
-        
+
         if self._calc_operator and not self._calc_waiting_for_operand2:
             self._on_calc_equals()
-        
+
         self._calc_operand1 = self._calc_parse_number(self.calc_display.text())
         self._calc_operator = op
         self._calc_waiting_for_operand2 = True
         self._calc_expression = self.calc_display.text() + " " + op + " "
         self.calc_expression_display.setText(self._calc_expression)
-    
+
     def _on_calc_equals(self):
-        """等于"""
         if not hasattr(self, '_calc_expression'):
             return
-        
+
         if self._calc_operator is None or self._calc_operand1 is None:
             return
-        
+
         operand2 = self._calc_parse_number(self.calc_display.text())
         op1 = self._calc_operand1
         op2 = operand2
         op = self._calc_operator
-        
-        # 构建完整表达式用于显示
+
         full_expression = f"{self._calc_expression}{self.calc_display.text()} ="
-        
+
         try:
             if self.calc_mode_combo.currentIndex() == 1:
-                # 程序员模式 - 整数运算
                 op1 = int(op1)
                 op2 = int(op2)
                 if op == "+":
@@ -1083,7 +1049,6 @@ class QuicklyCmdWidget(QWidget):
                 else:
                     result = op1
             else:
-                # 标准模式
                 if op == "+":
                     result = op1 + op2
                 elif op == "-":
@@ -1100,7 +1065,7 @@ class QuicklyCmdWidget(QWidget):
                     result = op1 * op2 / 100
                 else:
                     result = op1
-            
+
             self.calc_expression_display.setText(full_expression)
             self.calc_display.setText(str(result))
             self._calc_operand1 = None
@@ -1110,9 +1075,8 @@ class QuicklyCmdWidget(QWidget):
         except Exception as e:
             self.calc_expression_display.setText(full_expression)
             self.calc_display.setText(f"错误: {str(e)}")
-    
+
     def _on_calc_negate(self):
-        """取反 (±)"""
         current = self.calc_display.text()
         if current and current != "0" and not current.startswith("错误"):
             try:
@@ -1125,9 +1089,8 @@ class QuicklyCmdWidget(QWidget):
                     self._update_programmer_display(-val)
             except (ValueError, TypeError):
                 pass
-    
+
     def _on_calc_reciprocal(self):
-        """倒数 (1/x)"""
         current = self.calc_display.text()
         if not current or current.startswith("错误"):
             return
@@ -1144,9 +1107,8 @@ class QuicklyCmdWidget(QWidget):
             self._calc_waiting_for_operand2 = True
         except (ValueError, TypeError):
             pass
-    
+
     def _on_calc_square(self):
-        """平方 (x²)"""
         current = self.calc_display.text()
         if not current or current.startswith("错误"):
             return
@@ -1162,9 +1124,8 @@ class QuicklyCmdWidget(QWidget):
             self._calc_waiting_for_operand2 = True
         except (ValueError, TypeError):
             pass
-    
+
     def _on_calc_sqrt(self):
-        """平方根 (√x)"""
         current = self.calc_display.text()
         if not current or current.startswith("错误"):
             return
@@ -1183,9 +1144,8 @@ class QuicklyCmdWidget(QWidget):
             self._calc_waiting_for_operand2 = True
         except (ValueError, TypeError):
             pass
-    
+
     def _on_calc_bitwise_not(self):
-        """按位取反（程序员模式）"""
         current = self.calc_display.text()
         try:
             val = self._calc_parse_number(current)
@@ -1195,12 +1155,10 @@ class QuicklyCmdWidget(QWidget):
             self._calc_waiting_for_operand2 = True
         except (ValueError, TypeError):
             pass
-    
+
     def _calc_parse_number(self, text):
-        """解析数字"""
         try:
             if self.calc_mode_combo.currentIndex() == 1:
-                # 程序员模式 - 十六进制输入
                 text = text.strip()
                 if text.startswith("0x"):
                     return int(text, 16)
@@ -1215,9 +1173,8 @@ class QuicklyCmdWidget(QWidget):
                     return int(text)
         except ValueError:
             return 0
-    
+
     def _update_programmer_display(self, value):
-        """更新程序员模式的进制显示"""
         if self.calc_mode_combo.currentIndex() == 1 and self.programmer_display.isVisible():
             try:
                 int_val = int(value)
@@ -1228,168 +1185,121 @@ class QuicklyCmdWidget(QWidget):
                 self.prog_dec_value.setText(str(value))
                 self.prog_bin_value.setText("错误")
                 self.prog_hex_value.setText("错误")
-    
+
     def _create_number_convert_panel(self):
-        """创建数值转换面板"""
         group = QGroupBox("数制转换 (十进制/二进制/十六进制)")
         group.setStyleSheet(self._get_group_box_style())
         layout = QVBoxLayout(group)
-        
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
         text_primary = self.get_style('text', '#ffffff')
         font_size = self.get_font_size('size-md', '12px')
-        
+        input_min_height = 30
+
         result_layout = QFormLayout()
-        result_layout.setLabelAlignment(Qt.AlignmentFlag.AlignCenter)
+        result_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        result_layout.setSpacing(8)
+        result_layout.setContentsMargins(0, 0, 0, 0)
 
         dec_label = QLabel("十进制:")
         dec_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         dec_label.setFixedWidth(96)
         dec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.dec_input = QLineEdit()
+        self.dec_input = AutoResizeTextEdit(min_height=input_min_height)
         self.dec_input.setPlaceholderText("输入十进制数值...")
         self.dec_input.setStyleSheet(self._get_line_edit_style())
         self.dec_input.textChanged.connect(self.on_dec_input_changed)
         result_layout.addRow(dec_label, self.dec_input)
-        
+
         bin_label = QLabel("二进制:")
         bin_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         bin_label.setFixedWidth(96)
         bin_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bin_input = QLineEdit()
+        self.bin_input = AutoResizeTextEdit(min_height=input_min_height)
         self.bin_input.setPlaceholderText("输入二进制 (如: 0b1010)")
         self.bin_input.setStyleSheet(self._get_line_edit_style())
         self.bin_input.textChanged.connect(self.on_bin_input_changed)
         result_layout.addRow(bin_label, self.bin_input)
-        
+
         hex_label = QLabel("十六进制:")
         hex_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         hex_label.setFixedWidth(96)
         hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hex_input = QLineEdit()
+        self.hex_input = AutoResizeTextEdit(min_height=input_min_height)
         self.hex_input.setPlaceholderText("输入十六进制 (如: 0xFF)")
         self.hex_input.setStyleSheet(self._get_line_edit_style())
         self.hex_input.textChanged.connect(self.on_hex_input_changed)
         result_layout.addRow(hex_label, self.hex_input)
-        
+
+        # 设置同步组：dec/bin/hex 三个输入框保持相同高度
+        number_convert_group = [self.dec_input, self.bin_input, self.hex_input]
+        for w in number_convert_group:
+            w.set_sync_group(number_convert_group)
+
         layout.addLayout(result_layout)
         return group
-    
+
     def _create_hex_string_panel(self):
-        """创建十六进制/字符串转换面板"""
         group = QGroupBox("十六进制数组与字符串转换")
         group.setStyleSheet(self._get_group_box_style())
         layout = QVBoxLayout(group)
-        
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
         text_primary = self.get_style('text', '#ffffff')
         font_size = self.get_font_size('size-md', '12px')
-        
+        input_min_height = 30
+
         hex_row = QHBoxLayout()
+        hex_row.setSpacing(8)
         hex_label = QLabel("十六进制数组:")
         hex_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         hex_label.setFixedWidth(96)
         hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hex_row.addWidget(hex_label)
-        
-        self.hex_array_input = QLineEdit()
+
+        self.hex_array_input = AutoResizeTextEdit(min_height=input_min_height)
         self.hex_array_input.setPlaceholderText("如: 0x48 0x65 0x6C 0x6C 0x6F")
         self.hex_array_input.setStyleSheet(self._get_line_edit_style())
         self.hex_array_input.textChanged.connect(self.on_hex_array_input_changed)
         hex_row.addWidget(self.hex_array_input)
         layout.addLayout(hex_row)
-        
+
         str_row = QHBoxLayout()
+        str_row.setSpacing(8)
         str_label = QLabel("字符串:")
         str_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         str_label.setFixedWidth(96)
         str_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         str_row.addWidget(str_label)
-        
-        self.string_input = QLineEdit()
+
+        self.string_input = AutoResizeTextEdit(min_height=input_min_height)
         self.string_input.setPlaceholderText("输入字符串...")
         self.string_input.setStyleSheet(self._get_line_edit_style())
         self.string_input.textChanged.connect(self.on_string_input_changed)
         str_row.addWidget(self.string_input)
         layout.addLayout(str_row)
-        
+
+        # 设置同步组：hex_array/string 两个输入框保持相同高度
+        hex_string_group = [self.hex_array_input, self.string_input]
+        for w in hex_string_group:
+            w.set_sync_group(hex_string_group)
+
         return group
 
-    def on_compile(self):
-        """编译按钮点击"""
-        self.compile_output.clear()
-        self.status_label.setText("编译中...")
-        self.progress_label.setText("")
-
-        env_data = self.compile_env_combo.currentData()
-        comp_data = self.compile_component_combo.currentData()
-
-        if not env_data or not comp_data:
-            self.compile_output.appendPlainText("[错误] 配置数据无效")
-            self.status_label.setText("就绪")
-            return
-
-        server = env_data.get('server', 'localhost')
-        path = env_data.get('path', '.')
-        docker = env_data.get('docker')
-        targets = comp_data.get('targets', ['all'])
-
-        self.compile_output.appendPlainText(f"编译环境: {env_data.get('name', 'Unknown')}")
-        self.compile_output.appendPlainText(f"服务器: {server}")
-        self.compile_output.appendPlainText(f"路径: {path}")
-        if docker:
-            self.compile_output.appendPlainText(f"Docker: {docker}")
-        self.compile_output.appendPlainText(f"编译目标: {', '.join(targets)}")
-        self.compile_output.appendPlainText("-" * 40)
-
-        for i, target in enumerate(targets):
-            self.compile_output.appendPlainText(f"\n[{target}] 开始编译...")
-            self.progress_label.setText(f"{i+1}/{len(targets)}")
-
-        self.compile_output.appendPlainText("\n" + "-" * 40)
-        self.compile_output.appendPlainText("[完成] 编译成功")
-        self.status_label.setText("编译完成")
-        self.progress_label.setText("100%")
-
-    def on_test(self):
-        """运行测试"""
-        self.compile_output.clear()
-        self.status_label.setText("测试中...")
-
-        test_data = self.test_env_combo.currentData()
-        if test_data:
-            test_name = test_data.get('name', 'Unknown')
-            test_cmd = test_data.get('command', '')
-
-            self.compile_output.appendPlainText(f"测试类型: {test_name}")
-            self.compile_output.appendPlainText(f"测试命令: {test_cmd}")
-            self.compile_output.appendPlainText("-" * 40)
-            self.compile_output.appendPlainText("\n[模拟] 测试运行中...")
-            self.compile_output.appendPlainText("\n" + "-" * 40)
-            self.compile_output.appendPlainText("[完成] 测试通过")
-
-        self.status_label.setText("测试完成")
-        self.progress_label.setText("")
-
-    def on_clean(self):
-        """清理按钮点击"""
-        self.compile_output.clear()
-        self.status_label.setText("就绪")
-        self.progress_label.setText("")
-
     def _is_updating(self):
-        """检查是否正在更新，避免循环触发"""
         return getattr(self, '_updating_conversion', False)
-    
+
     def _set_updating(self, value):
-        """设置更新状态"""
         self._updating_conversion = value
-    
+
     def on_dec_input_changed(self):
-        """十进制输入变化时自动转换"""
         if self._is_updating():
             return
-        
+
         input_val = self.dec_input.text().strip()
-        
+
         if not input_val:
             self.bin_input.blockSignals(True)
             self.hex_input.blockSignals(True)
@@ -1420,10 +1330,9 @@ class QuicklyCmdWidget(QWidget):
             self._set_updating(False)
 
     def on_bin_input_changed(self):
-        """二进制输入变化时自动转换"""
         if self._is_updating():
             return
-        
+
         input_val = self.bin_input.text().strip().lower()
 
         if not input_val:
@@ -1457,10 +1366,9 @@ class QuicklyCmdWidget(QWidget):
             self._set_updating(False)
 
     def on_hex_input_changed(self):
-        """十六进制输入变化时自动转换"""
         if self._is_updating():
             return
-        
+
         input_val = self.hex_input.text().strip().lower()
 
         if not input_val:
@@ -1494,12 +1402,11 @@ class QuicklyCmdWidget(QWidget):
             self._set_updating(False)
 
     def on_hex_array_input_changed(self):
-        """十六进制数组输入变化时自动转换为字符串"""
         if getattr(self, '_hex_str_updating', False):
             return
-        
+
         hex_input = self.hex_array_input.text().strip()
-        
+
         if not hex_input:
             self.string_input.blockSignals(True)
             self.string_input.clear()
@@ -1512,7 +1419,7 @@ class QuicklyCmdWidget(QWidget):
             for val in hex_values:
                 val = val.lower().replace("0x", "")
                 bytes_data.append(int(val, 16))
-            
+
             result = bytes(bytes_data).decode('utf-8', errors='replace')
             self._hex_str_updating = True
             self.string_input.blockSignals(True)
@@ -1527,10 +1434,9 @@ class QuicklyCmdWidget(QWidget):
             self._hex_str_updating = False
 
     def on_string_input_changed(self):
-        """字符串输入变化时自动转换为十六进制数组"""
         if getattr(self, '_hex_str_updating', False):
             return
-        
+
         str_input = self.string_input.text()
 
         if not str_input:
@@ -1552,4 +1458,3 @@ class QuicklyCmdWidget(QWidget):
             self.hex_array_input.clear()
             self.hex_array_input.blockSignals(False)
             self._hex_str_updating = False
-

@@ -1,0 +1,8 @@
+{
+    "name": "CalcTool",
+    "display_name": "计算工具",
+    "version": "1.0.0",
+    "description": "计算工具，支持标准/程序员模式计算器及进制转换",
+    "toolbar": [],
+    "menu": null
+}

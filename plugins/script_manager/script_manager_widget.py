@@ -31,24 +31,35 @@ class ScriptEditorDialog(QDialog):
         layout = QVBoxLayout(self)
         
         form_layout = QFormLayout()
-        
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        name_label = QLabel("名称:")
+        name_label.setFixedWidth(76)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.name_edit = QLineEdit()
         self.name_edit.setText(self.script.get('name', ''))
-        form_layout.addRow("名称:", self.name_edit)
-        
+        form_layout.addRow(name_label, self.name_edit)
+
+        id_label = QLabel("ID:")
+        id_label.setFixedWidth(76)
+        id_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.id_edit = QLineEdit()
         self.id_edit.setText(self.script.get('id', ''))
         self.id_edit.setReadOnly(bool(self.script))
-        form_layout.addRow("ID:", self.id_edit)
-        
+        form_layout.addRow(id_label, self.id_edit)
+
+        desc_label_form = QLabel("描述:")
+        desc_label_form.setFixedWidth(76)
+        desc_label_form.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.desc_edit = QTextEdit()
         self.desc_edit.setText(self.script.get('description', ''))
         self.desc_edit.setMaximumHeight(60)
-        form_layout.addRow("描述:", self.desc_edit)
-        
+        form_layout.addRow(desc_label_form, self.desc_edit)
+
         layout.addLayout(form_layout)
-        
+
         desc_label = QLabel("脚本内容:")
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc_label)
         
         self.script_edit = QPlainTextEdit()
@@ -71,9 +82,9 @@ session.set_result("status", "ok")
         
         self.script_edit.setStyleSheet("""
             QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #00ff00;
-                border: 1px solid #3c3c3c;
+                background-color: #ffffff;
+                color: #2c3e50;
+                border: 1px solid #dcdfe6;
                 border-radius: 4px;
                 padding: 8px;
                 font-family: Consolas;
@@ -138,7 +149,99 @@ class ScriptManagerWidget(QWidget):
         if self._config_manager:
             return self._config_manager.get_font_size(key, default)
         return default
+
+    def _get_border_radius(self, key, default='4px'):
+        """获取边框圆角"""
+        if self._config_manager:
+            return self._config_manager.get_border_radius(key, default)
+        return default
+
+    def _get_button_css(self, button_type='button'):
+        """获取统一按钮 CSS 样式（蓝色背景+白色字体+加粗）"""
+        if self._config_manager:
+            return self._config_manager.get_button_css(button_type)
+        primary = self._get_style('primary', '#3a8fd4')
+        primary_hover = self._get_style('primary-hover', '#4a9fe4')
+        primary_pressed = self._get_style('primary-pressed', '#2a7fc4')
+        return f"""
+            QPushButton {{
+                background-color: {primary};
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {primary_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {primary_pressed};
+            }}
+        """
     
+    def _get_menu_css(self):
+        """获取统一菜单 CSS 样式（悬停/选中时字体为白色）"""
+        if self._config_manager:
+            return self._config_manager.get_menu_css()
+        bg = self._get_style('bg-tertiary', '#2d2d30')
+        color = self._get_style('text', '#e0e0e0')
+        border = self._get_style('border', '#3c3c3c')
+        primary = self._get_style('primary', '#3a8fd4')
+        separator_bg = self._get_style('border', '#3c3c3c')
+        return f"""
+            QMenu {{
+                background-color: {bg};
+                color: {color};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px;
+                min-width: 100px;
+                color: {color};
+            }}
+            QMenu::item:selected {{
+                background-color: {primary};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {separator_bg};
+                margin: 4px 0;
+            }}
+        """
+
+    def _get_group_box_style(self):
+        """获取统一 QGroupBox 样式（标题颜色随主题变化）"""
+        text_primary = self._get_style('text', '#e0e0e0')
+        border_light = self._get_style('border-light', '#4a4a4a')
+        border_radius = self._get_border_radius('lg', '8px')
+        bg_secondary = self._get_style('bg-secondary', '#252526')
+        font_size = self._get_font_size('size-md', '12px')
+
+        return f"""
+            QGroupBox {{
+                color: {text_primary};
+                font-weight: bold;
+                font-size: {font_size};
+                border: 1px solid {border_light};
+                border-radius: {border_radius};
+                margin-top: 8px;
+                padding-top: 10px;
+                background-color: {bg_secondary};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                color: {text_primary};
+                background-color: {bg_secondary};
+            }}
+        """
+
     def _get_remote_cmd_plugin(self):
         """获取RemoteCmd插件"""
         if not self._remote_cmd_plugin and self._plugin_manager:
@@ -157,12 +260,105 @@ class ScriptManagerWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        
+
         left_panel = self._create_left_panel()
         layout.addWidget(left_panel, 1)
-        
+
         right_panel = self._create_right_panel()
         layout.addWidget(right_panel, 3)
+
+    def refresh_theme_styles(self):
+        """刷新主题样式（主题切换时由框架调用）"""
+        # 更新缓存的颜色方案，确保使用最新主题颜色
+        self._color_scheme = self._get_color_scheme()
+        text_primary = self._get_style('text', '#e0e0e0')
+        text_hint = self._get_style('text-hint', '#858585')
+        text_secondary = self._get_style('text-secondary', '#b0b0b0')
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_input = self._get_style('bg-input', '#454545')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        border = self._get_style('border', '#3c3c3c')
+        selection = self._get_style('selection', '#264f78')
+        selection_text = self._get_style('selection-text', '#ffffff')
+        font_size = self._get_font_size('size-md', '12px')
+
+        # 刷新所有 QGroupBox
+        group_box_style = self._get_group_box_style()
+        for gb in self.findChildren(QGroupBox):
+            gb.setStyleSheet(group_box_style)
+
+        # 刷新文件树
+        if hasattr(self, 'file_tree'):
+            self.file_tree.setStyleSheet(f"""
+                QTreeView {{
+                    background-color: {bg_main};
+                    color: {text_primary};
+                    border: 1px solid {border};
+                    border-radius: 4px;
+                }}
+                QTreeView::item {{
+                    padding: 6px;
+                }}
+                QTreeView::item:selected {{
+                    background-color: {selection};
+                    color: {selection_text};
+                }}
+                QTreeView::item:hover {{
+                    background-color: {bg_tertiary};
+                }}
+            """)
+
+        # 刷新脚本编辑器
+        if hasattr(self, 'script_editor'):
+            self.script_editor.setStyleSheet(f"""
+                QPlainTextEdit {{
+                    background-color: {bg_main};
+                    color: {text_primary};
+                    border: 1px solid {border};
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-family: Consolas;
+                }}
+            """)
+
+        # 刷新输出区域
+        if hasattr(self, 'output_text'):
+            self.output_text.setStyleSheet(f"""
+                QPlainTextEdit {{
+                    background-color: {bg_main};
+                    color: {text_primary};
+                    border: 1px solid {border};
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-family: Consolas;
+                }}
+            """)
+
+        # 刷新下拉框
+        if hasattr(self, 'env_combo'):
+            self.env_combo.setStyleSheet(f"""
+                QComboBox {{
+                    background-color: {bg_input};
+                    color: {text_primary};
+                    border: 1px solid {border};
+                    padding: 6px 10px;
+                    border-radius: 4px;
+                }}
+            """)
+
+        # 刷新所有标准标签（文件、描述、脚本列表等）
+        label_style = f"color: {text_primary}; font-size: {font_size}; font-weight: 500;"
+        for label in self.findChildren(QLabel):
+            label.setStyleSheet(label_style)
+        # 特殊标签单独覆盖
+        if hasattr(self, 'script_name_label'):
+            self.script_name_label.setStyleSheet(f"color: {text_primary}; font-size: 16px; font-weight: bold;")
+        if hasattr(self, 'script_desc_label'):
+            self.script_desc_label.setStyleSheet(f"color: {text_hint}; font-size: {font_size};")
+
+        # 刷新按钮
+        for btn in self.findChildren(QPushButton):
+            btn.setStyleSheet(self._get_button_css('button'))
     
     def _create_left_panel(self):
         """创建左侧面板（文件树）"""
@@ -170,48 +366,34 @@ class ScriptManagerWidget(QWidget):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         
+        primary = self._get_style('primary', '#3a8fd4')
+        primary_hover = self._get_style('primary-hover', '#4a9fe4')
+        bg_input = self._get_style('bg-input', '#454545')
+        bg_input_focus = self._get_style('bg-input-focus', '#3a5878')
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        border = self._get_style('border', '#3c3c3c')
+        text_primary = self._get_style('text', '#e0e0e0')
+        selection = self._get_style('selection', '#264f78')
+        selection_text = self._get_style('selection-text', '#ffffff')
+        
         header_layout = QHBoxLayout()
         title = QLabel("脚本文件")
-        primary = self._get_style('primary', '#007acc')
-        text_primary = self._get_style('text', '#ffffff')
         title.setStyleSheet(f"color: {text_primary}; font-weight: bold; font-size: 14px;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(title)
         
         header_layout.addStretch()
         
         add_btn = QPushButton("新建")
         add_btn.setFixedHeight(28)
-        add_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {primary};
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                padding: 4px 12px;
-            }}
-            QPushButton:hover {{
-                background-color: #005a9e;
-            }}
-        """)
+        add_btn.setStyleSheet(self._get_button_css('button'))
         add_btn.clicked.connect(self.on_add_script)
         header_layout.addWidget(add_btn)
         
         refresh_btn = QPushButton("刷新")
         refresh_btn.setFixedHeight(28)
-        refresh_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #3c3c3c;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 12px;
-                padding: 4px 12px;
-            }}
-            QPushButton:hover {{
-                background-color: #4c4c4c;
-            }}
-        """)
+        refresh_btn.setStyleSheet(self._get_button_css('button'))
         refresh_btn.clicked.connect(self._refresh_file_tree)
         header_layout.addWidget(refresh_btn)
         
@@ -224,22 +406,23 @@ class ScriptManagerWidget(QWidget):
         self.file_tree.setModel(self.file_model)
         self.file_tree.setHeaderHidden(True)
         self._populate_file_tree()
-        self.file_tree.setStyleSheet("""
-            QTreeView {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                border: 1px solid #3c3c3c;
+        self.file_tree.setStyleSheet(f"""
+            QTreeView {{
+                background-color: {bg_main};
+                color: {text_primary};
+                border: 1px solid {border};
                 border-radius: 4px;
-            }
-            QTreeView::item {
+            }}
+            QTreeView::item {{
                 padding: 6px;
-            }
-            QTreeView::item:selected {
-                background-color: #007acc;
-            }
-            QTreeView::item:hover {
-                background-color: #2d2d30;
-            }
+            }}
+            QTreeView::item:selected {{
+                background-color: {selection};
+                color: {selection_text};
+            }}
+            QTreeView::item:hover {{
+                background-color: {bg_tertiary};
+            }}
         """)
         self.file_tree.clicked.connect(self.on_file_selected)
         self.file_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -254,54 +437,85 @@ class ScriptManagerWidget(QWidget):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         
+        # 获取主题颜色
+        primary = self._get_style('primary', '#3a8fd4')
+        primary_hover = self._get_style('primary-hover', '#4a9fe4')
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_input = self._get_style('bg-input', '#454545')
+        bg_input_focus = self._get_style('bg-input-focus', '#3a5878')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        border = self._get_style('border', '#3c3c3c')
+        border_light = self._get_style('border-light', '#4a4a4a')
+        text_primary = self._get_style('text', '#e0e0e0')
+        text_secondary = self._get_style('text-secondary', '#b0b0b0')
+        text_hint = self._get_style('text-hint', '#858585')
+        success = self._get_style('success', '#4ec9b0')
+        success_hover = self._get_style('success-hover', '#5dd4bb')
+        danger = self._get_style('danger', '#f44747')
+        danger_hover = self._get_style('danger-hover', '#f65a5a')
+        
         info_group = QGroupBox("脚本信息")
+        info_group.setStyleSheet(self._get_group_box_style())
         info_layout = QFormLayout(info_group)
-        
-        text_primary = self._get_style('text', '#ffffff')
+        info_layout.setLabelAlignment(Qt.AlignmentFlag.AlignCenter)
+
         font_size = self._get_font_size('size-md', '12px')
-        
+        label_style = f"color: {text_primary}; font-size: {font_size};"
+
         self.script_name_label = QLabel("未选择")
         self.script_name_label.setStyleSheet(f"color: {text_primary}; font-size: 16px; font-weight: bold;")
-        info_layout.addRow("文件:", self.script_name_label)
-        
+        self.script_name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        file_label = QLabel("文件:")
+        file_label.setStyleSheet(label_style)
+        file_label.setFixedWidth(76)
+        file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info_layout.addRow(file_label, self.script_name_label)
+
         self.script_desc_label = QLabel("")
-        self.script_desc_label.setStyleSheet(f"color: #888888; font-size: {font_size};")
+        self.script_desc_label.setStyleSheet(f"color: {text_hint}; font-size: {font_size};")
         self.script_desc_label.setWordWrap(True)
-        info_layout.addRow("描述:", self.script_desc_label)
-        
+        self.script_desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc_label = QLabel("描述:")
+        desc_label.setStyleSheet(label_style)
+        desc_label.setFixedWidth(76)
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info_layout.addRow(desc_label, self.script_desc_label)
+
         layout.addWidget(info_group)
-        
+
         editor_group = QGroupBox("脚本内容")
+        editor_group.setStyleSheet(self._get_group_box_style())
         editor_layout = QVBoxLayout(editor_group)
         
         self.script_editor = QPlainTextEdit()
         self.script_editor.setFont(QFont("Consolas", 11))
-        self.script_editor.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #00ff00;
-                border: 1px solid #3c3c3c;
+        self.script_editor.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {bg_main};
+                color: {text_primary};
+                border: 1px solid {border};
                 border-radius: 4px;
                 padding: 8px;
                 font-family: Consolas;
-            }
+            }}
         """)
         editor_layout.addWidget(self.script_editor)
         
         layout.addWidget(editor_group)
         
         env_group = QGroupBox("运行环境")
+        env_group.setStyleSheet(self._get_group_box_style())
         env_layout = QHBoxLayout(env_group)
         
         self.env_combo = QComboBox()
-        self.env_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #5a5a5d;
+        self.env_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border};
                 padding: 6px 10px;
                 border-radius: 4px;
-            }
+            }}
         """)
         self._load_environments()
         env_layout.addWidget(self.env_combo, 1)
@@ -309,101 +523,50 @@ class ScriptManagerWidget(QWidget):
         layout.addWidget(env_group)
         
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(36)
         
         self.run_btn = QPushButton("运行脚本")
         self.run_btn.setFixedHeight(36)
-        self.run_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #28a745;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #218838;
-            }
-            QPushButton:disabled {
-                background-color: #555555;
-            }
-        """)
+        self.run_btn.setStyleSheet(self._get_button_css('button'))
         self.run_btn.clicked.connect(self.on_run_script)
         btn_layout.addWidget(self.run_btn)
         
         self.validate_btn = QPushButton("验证语法")
         self.validate_btn.setFixedHeight(36)
-        self.validate_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #6c757d;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 13px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #5a6268;
-            }
-        """)
+        self.validate_btn.setStyleSheet(self._get_button_css('button'))
         self.validate_btn.clicked.connect(self.on_validate_script)
         btn_layout.addWidget(self.validate_btn)
         
         self.save_btn = QPushButton("保存")
         self.save_btn.setFixedHeight(36)
-        self.save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007acc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #005a9e;
-            }
-        """)
+        self.save_btn.setStyleSheet(self._get_button_css('button'))
         self.save_btn.clicked.connect(self.on_save_script)
         btn_layout.addWidget(self.save_btn)
         
         self.delete_btn = QPushButton("删除")
         self.delete_btn.setFixedHeight(36)
-        self.delete_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #dc3545;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 13px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #c82333;
-            }
-        """)
+        self.delete_btn.setStyleSheet(self._get_button_css('button-danger'))
         self.delete_btn.clicked.connect(self.on_delete_script)
         btn_layout.addWidget(self.delete_btn)
         
         layout.addLayout(btn_layout)
         
         output_group = QGroupBox("执行输出")
+        output_group.setStyleSheet(self._get_group_box_style())
         output_layout = QVBoxLayout(output_group)
         
         self.output_text = QPlainTextEdit()
         self.output_text.setFont(QFont("Consolas", 10))
         self.output_text.setReadOnly(True)
-        self.output_text.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #0c0c0c;
-                color: #00ff00;
-                border: 1px solid #3c3c3c;
+        self.output_text.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {bg_main};
+                color: {text_primary};
+                border: 1px solid {border};
                 border-radius: 4px;
                 padding: 8px;
                 font-family: Consolas;
-            }
+            }}
         """)
         output_layout.addWidget(self.output_text)
         
@@ -451,6 +614,7 @@ class ScriptManagerWidget(QWidget):
             return
         
         menu = QMenu(self)
+        menu.setStyleSheet(self._get_menu_css())
         
         run_action = QAction("运行", self)
         run_action.triggered.connect(lambda: self.on_run_script())
@@ -473,7 +637,7 @@ class ScriptManagerWidget(QWidget):
         self.env_combo.clear()
         
         if self._config_manager:
-            plugin_config = self._config_manager.get_plugin_config("QuicklyCmd")
+            plugin_config = self._config_manager.get_plugin_config("CompileTool")
             if plugin_config and 'compile' in plugin_config:
                 environments = plugin_config['compile'].get('compile_environments', [])
                 for env in environments:

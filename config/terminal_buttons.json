@@ -1,0 +1,13 @@
+{
+    "buttons": [
+        {
+            "id": "f8affa4ac18f452e8ce8bfc47049e9b1",
+            "name": "hello",
+            "type": "command",
+            "command": "ls -al",
+            "timeout": 5,
+            "created_at": 1785549000
+        }
+    ],
+    "visible": true
+}

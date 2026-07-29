@@ -1,0 +1,1 @@
+from plugins.compile_tool.compile_tool_widget import CompileToolPlugin

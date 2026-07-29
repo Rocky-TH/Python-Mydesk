@@ -3,11 +3,19 @@ import json
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QStackedWidget,
     QMenuBar, QMenu, QStatusBar, QLabel,
-    QToolBar, QTabWidget, QMessageBox
+    QToolBar, QTabWidget, QMessageBox,
+    QDialog, QTextEdit, QPushButton
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QIcon, QAction, QActionGroup
 from utils.config_manager import ConfigManager
+from utils.icon_generator import load_app_icon
+
+# 下拉框三角形箭头图片路径
+_DOWN_ARROW_IMG = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    'assets', 'down_arrow.png'
+).replace('\\', '/')
 
 
 class ThemeSwitchWorker(QThread):
@@ -34,34 +42,19 @@ class MainWindow(QMainWindow):
         self.plugin_widgets = {}
         self.current_plugin_name = None
         self._theme_worker = None
+        self._menu_bar_created = False
+        self._tool_bar_created = False
+        self._status_bar_created = False
+        # MyDesk 版本号（统一管理，用于「关于」与状态栏显示）
+        self._app_version = "1.0.0"
 
         self.init_ui()
         self.load_plugins()
     
     def _get_style(self, key, default=None):
-        """获取样式配置（支持新旧两种格式）"""
-        value = self._color_scheme.get(key)
-        if value is not None:
-            return value
-        old_key_map = {
-            'background_main': 'bg-main',
-            'background_secondary': 'bg-secondary',
-            'background_tertiary': 'bg-tertiary',
-            'background_input': 'bg-input',
-            'background_input_focus': 'bg-input-focus',
-            'text_primary': 'text',
-            'text_secondary': 'text-secondary',
-            'border_light': 'border-light',
-            'border_focus': 'border-focus',
-            'selection_text': 'selection-text',
-            'primary_hover': 'primary-hover',
-            'primary_pressed': 'primary-pressed',
-            'success_hover': 'success-hover',
-            'text_success': 'text-success',
-            'text_danger': 'text-danger'
-        }
-        if key in old_key_map:
-            return self._color_scheme.get(old_key_map[key], default)
+        """获取样式配置（直接从 config_manager 实时获取，避免缓存不一致）"""
+        if self.config_manager:
+            return self.config_manager.get_color(key, default)
         return default
     
     def _get_font_size(self, key, default='12px'):
@@ -73,8 +66,21 @@ class MainWindow(QMainWindow):
         return self.config_manager.get_border_radius(key, default)
 
     def init_ui(self):
-        self.setWindowTitle("MyDesk - 终端管理器")
+        # 加载应用配置（标题、图标等）
+        app_config = self.config_manager.get_app_config()
+        app_title = app_config.get('title', 'MyDesk - 终端管理器')
+        app_version = app_config.get('version', self._app_version)
+        
+        # 更新版本号
+        self._app_version = app_version
+        
+        self.setWindowTitle(app_title)
         self.setGeometry(100, 100, 1200, 800)
+        
+        # 加载并设置应用图标
+        icon_path = self.config_manager.get_app_icon()
+        app_icon = load_app_icon(icon_path)
+        self.setWindowIcon(app_icon)
 
         bg_main = self._get_style('bg-main', '#1e1e1e')
         bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
@@ -101,6 +107,9 @@ class MainWindow(QMainWindow):
             QWidget {{
                 background-color: {bg_main};
             }}
+            QComboBox::down-arrow {{
+                image: url({_DOWN_ARROW_IMG});
+            }}
         """)
         self.setCentralWidget(self.central_widget)
 
@@ -110,16 +119,7 @@ class MainWindow(QMainWindow):
 
         self.plugin_tabs = QTabWidget()
         self.plugin_tabs.setTabPosition(QTabWidget.TabPosition.North)
-        
-        # 定义插件标签页的默认背景色
-        tab1_bg = "#1a4d6e"  # QuicklyCmd - 深蓝
-        tab1_border = "#007acc"
-        tab1_selected = "#007acc"
-        
-        tab2_bg = "#1a5d3e"  # 终端 - 深绿
-        tab2_border = "#28a745"
-        tab2_selected = "#28a745"
-        
+
         self.plugin_tabs.setStyleSheet(f"""
             QTabWidget::pane {{
                 border: none;
@@ -128,11 +128,11 @@ class MainWindow(QMainWindow):
             QTabBar::tab {{
                 background-color: {bg_tertiary};
                 color: {text_secondary};
-                padding: 10px 24px;
+                padding: 6px 18px;
                 border: 1px solid {border};
                 border-bottom: none;
                 margin-right: 2px;
-                margin-top: 4px;
+                margin-top: 2px;
                 border-top-left-radius: {border_radius_normal};
                 border-top-right-radius: {border_radius_normal};
                 font-size: {font_size_medium};
@@ -140,38 +140,13 @@ class MainWindow(QMainWindow):
             }}
             QTabBar::tab:selected {{
                 background-color: {primary};
-                color: {text_primary};
+                color: #ffffff;
                 border-color: {primary};
+                font-weight: bold;
             }}
             QTabBar::tab:hover:!selected {{
                 background-color: {bg_input};
                 color: {text_primary};
-            }}
-            
-            /* 第一个标签页 - QuicklyCmd */
-            QTabBar::tab:first {{
-                background-color: {tab1_bg};
-                border-color: {tab1_border};
-            }}
-            QTabBar::tab:first:selected {{
-                background-color: {tab1_selected};
-                border-color: {tab1_selected};
-            }}
-            QTabBar::tab:first:hover:!selected {{
-                background-color: {tab1_border};
-            }}
-            
-            /* 第二个标签页 - 终端 */
-            QTabBar::tab:nth-child(2) {{
-                background-color: {tab2_bg};
-                border-color: {tab2_border};
-            }}
-            QTabBar::tab:nth-child(2):selected {{
-                background-color: {tab2_selected};
-                border-color: {tab2_selected};
-            }}
-            QTabBar::tab:nth-child(2):hover:!selected {{
-                background-color: {tab2_border};
             }}
         """)
         self.plugin_tabs.currentChanged.connect(self.on_plugin_tab_changed)
@@ -183,13 +158,20 @@ class MainWindow(QMainWindow):
 
     def create_menu_bar(self):
         menubar = self.menuBar()
+        
+        # 如果菜单已创建，先清除旧的菜单内容（防止重复）
+        if self._menu_bar_created:
+            menubar.clear()
+        
         bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
         text_primary = self._get_style('text', '#ffffff')
         border = self._get_style('border', '#3c3c3c')
         border_light = self._get_style('border-light', '#5a5a5d')
         primary = self._get_style('primary', '#007acc')
         border_radius_small = self._get_border_radius('sm', '4px')
-        border_radius_normal = self._get_border_radius('md', '6px')
+        
+        # 使用统一菜单 CSS
+        menu_css = self.config_manager.get_menu_css()
         
         menubar.setStyleSheet(f"""
             QMenuBar {{
@@ -200,26 +182,11 @@ class MainWindow(QMainWindow):
             }}
             QMenuBar::item:selected {{
                 background-color: {primary};
+                color: #ffffff;
                 border-radius: {border_radius_small};
                 padding: 4px 8px;
             }}
-            QMenu {{
-                background-color: {bg_tertiary};
-                color: {text_primary};
-                border: 1px solid {border_light};
-                border-radius: {border_radius_normal};
-                padding: 4px;
-            }}
-            QMenu::item:selected {{
-                background-color: {primary};
-                border-radius: {border_radius_small};
-                padding: 4px 20px;
-            }}
-            QMenu::separator {{
-                height: 1px;
-                background-color: {border_light};
-                margin: 4px 8px;
-            }}
+            {menu_css}
         """)
 
         # 文件菜单
@@ -241,6 +208,10 @@ class MainWindow(QMainWindow):
         settings_menu.addMenu(self.theme_menu)
         self._theme_actions = {}
         
+        # 使用 QActionGroup 确保主题选项互斥（只能选一个）
+        self._theme_action_group = QActionGroup(self)
+        self._theme_action_group.setExclusive(True)
+        
         # 获取可用主题列表
         themes = self.config_manager.get_theme_list()
         current_theme = self.config_manager.get_current_theme()
@@ -253,6 +224,7 @@ class MainWindow(QMainWindow):
             theme_action.triggered.connect(
                 lambda checked, tid=theme_info['id']: self.change_theme(tid)
             )
+            self._theme_action_group.addAction(theme_action)
             self.theme_menu.addAction(theme_action)
             self._theme_actions[theme_info['id']] = theme_action
 
@@ -271,6 +243,9 @@ class MainWindow(QMainWindow):
         fullscreen_action.triggered.connect(self.toggle_fullscreen)
         self.view_menu.addAction(fullscreen_action)
 
+        # 工具注册菜单：位于「视图」与「帮助」之间，由各插件通过 register_menus 注册
+        self._build_plugin_menus(menubar)
+
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
 
@@ -278,7 +253,90 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
+        help_menu.addSeparator()
+
+        license_action = QAction("开源许可", self)
+        license_action.triggered.connect(self.show_license_info)
+        help_menu.addAction(license_action)
+
+        self._menu_bar_created = True
+
+    def _build_plugin_menus(self, menubar):
+        """构建插件注册的菜单。
+
+        通过 PluginManager.collect_plugin_menus() 收集所有插件注册的菜单定义，
+        并转换为 QMenu/QAction 添加到菜单栏。支持 action、submenu、separator，
+        以及通过 group 字段实现单选互斥（QActionGroup）。
+        """
+        if not self.plugin_manager:
+            return
+        # 清理上一次构建遗留的 QActionGroup（主题切换重建菜单栏时）
+        for old_group in getattr(self, '_plugin_menu_groups', []):
+            old_group.deleteLater()
+        self._plugin_menu_groups = []
+        try:
+            menus = self.plugin_manager.collect_plugin_menus()
+        except Exception:
+            return
+        for menu_def in menus:
+            title = menu_def.get('title', '')
+            if not title:
+                continue
+            menu = menubar.addMenu(title)
+            self._build_menu_items(menu, menu_def.get('items', []))
+
+    def _build_menu_items(self, menu, items):
+        """递归构建菜单项。
+
+        Args:
+            menu: 目标 QMenu。
+            items: 菜单项定义列表，每项为 dict，type 字段区分 action/submenu/separator。
+        """
+        # 按组名缓存 QActionGroup，使同组 checkable action 表现为单选
+        groups = {}
+        for item in items:
+            item_type = item.get('type')
+            if item_type == 'separator':
+                menu.addSeparator()
+                continue
+            if item_type == 'submenu':
+                submenu = menu.addMenu(item.get('label', ''))
+                self._build_menu_items(submenu, item.get('items', []))
+                continue
+            if item_type == 'action':
+                action = QAction(item.get('label', ''), self)
+                checkable = item.get('checkable', False)
+                action.setCheckable(checkable)
+                if checkable and item.get('checked', False):
+                    action.setChecked(True)
+                shortcut = item.get('shortcut')
+                if shortcut:
+                    action.setShortcut(shortcut)
+                if not item.get('enabled', True):
+                    action.setEnabled(False)
+                # 互斥组处理：同组 checkable action 表现为单选
+                group_name = item.get('group')
+                if group_name:
+                    if group_name not in groups:
+                        group = QActionGroup(self)
+                        group.setExclusive(True)
+                        groups[group_name] = group
+                        # 记录到实例，便于下次重建时清理
+                        if not hasattr(self, '_plugin_menu_groups'):
+                            self._plugin_menu_groups = []
+                        self._plugin_menu_groups.append(group)
+                    groups[group_name].addAction(action)
+                callback = item.get('callback')
+                if callback is not None:
+                    # QAction.triggered 发射 checked 参数；不可勾选 action 仍可正常回调
+                    action.triggered.connect(callback)
+                menu.addAction(action)
+
     def create_tool_bar(self):
+        if self._tool_bar_created:
+            # 移除旧工具栏
+            self.removeToolBar(self.toolbar)
+        
         self.toolbar = QToolBar("主工具栏")
         self.toolbar.setMovable(False)
         
@@ -320,19 +378,21 @@ class MainWindow(QMainWindow):
             }}
         """)
         self.addToolBar(self.toolbar)
+        self._tool_bar_created = True
 
     def build_plugin_actions(self):
         """根据插件配置文件动态构建菜单和工具栏"""
         self.toolbar.clear()
 
+        has_actions = False
         # 工具栏按钮根据插件配置生成
         for plugin_info in self.config_manager.get_plugins():
             plugin_name = plugin_info.get("name", "")
             plugin_config = self.config_manager.get_plugin_config(plugin_name)
-            
+
             if not plugin_config:
                 continue
-                
+
             toolbar_items = plugin_config.get("toolbar", [])
             for item in toolbar_items:
                 label = item.get("label", "")
@@ -355,27 +415,45 @@ class MainWindow(QMainWindow):
                         lambda checked, p=params: self.switch_to_plugin(p)
                     )
                 self.toolbar.addAction(action)
+                has_actions = True
 
             if toolbar_items:
                 self.toolbar.addSeparator()
 
+        # 无工具栏项时隐藏工具栏，避免菜单栏下方出现空白行
+        self.toolbar.setVisible(has_actions)
+
     def create_status_bar(self):
+        if self._status_bar_created:
+            return  # 状态栏只创建一次
+        
         self.status_bar = QStatusBar()
         primary = self._get_style('primary', '#007acc')
-        text_primary = self._get_style('text', '#ffffff')
         self.status_bar.setStyleSheet(f"""
             QStatusBar {{
                 background-color: {primary};
-                color: {text_primary};
+                color: #ffffff;
             }}
+            QStatusBar::item {{ border: none; }}
         """)
+        self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
 
+        # 框架状态（左侧）：显示当前插件名 + 框架就绪状态
         self.status_label = QLabel("就绪")
-        self.status_label.setStyleSheet(f"color: {text_primary};")
+        self.status_label.setStyleSheet("color: #ffffff;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_bar.addWidget(self.status_label)
 
-        self.status_bar.addPermanentWidget(QLabel("MyDesk v1.0.0"))
+        # 工具状态（左侧）：显示当前工具上报的状态，紧跟框架状态之后
+        self.tool_status_label = QLabel("")
+        self.tool_status_label.setStyleSheet("color: #ffffff; margin-left: 6px;")
+        self.tool_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_bar.addWidget(self.tool_status_label)
+
+        # 注册统一状态接口回调
+        self.plugin_manager.set_status_callback(self._on_tool_status_updated)
+        self._status_bar_created = True
 
     def load_plugins(self):
         # 使用 ConfigManager 加载插件，传递 config_manager 给 PluginManager
@@ -390,8 +468,11 @@ class MainWindow(QMainWindow):
 
         # 定义插件标签页的颜色方案
         plugin_tab_colors = [
-            {"bg": "#1a4d6e", "border": "#007acc"},  # QuicklyCmd - 深蓝
-            {"bg": "#1a5d3e", "border": "#28a745"},  # 终端 - 深绿
+            {"bg": "#2a5d7e", "border": "#3a8fd4"},  # 终端 - 柔和深蓝
+            {"bg": "#1a5d3e", "border": "#28a745"},  # 编译工具 - 深绿
+            {"bg": "#3d2b1f", "border": "#d97706"},  # 脚本管理 - 橙色
+            {"bg": "#2d3a4a", "border": "#569cd6"},  # 计算工具 - 浅蓝
+            {"bg": "#3d1f2b", "border": "#f44747"},  # 远程命令 - 红色
         ]
 
         # 为每个插件创建标签页
@@ -425,6 +506,10 @@ class MainWindow(QMainWindow):
 
         # 根据插件配置动态构建菜单和工具栏
         self.build_plugin_actions()
+        # 插件加载完成后重建菜单栏，使工具注册的菜单生效
+        # （init_ui 阶段构建菜单栏时插件尚未加载，collect_plugin_menus 返回空）
+        if self._menu_bar_created:
+            self.create_menu_bar()
 
     def on_plugin_tab_changed(self, index):
         """插件标签页切换"""
@@ -437,7 +522,27 @@ class MainWindow(QMainWindow):
                     plugin_config = self.config_manager.get_plugin_config(plugin_name)
                     display_name = plugin_config.get("display_name", plugin_name) if plugin_config else plugin_name
                     self.status_label.setText(f"当前插件: {display_name}")
+                    # 刷新工具状态显示（切换时显示当前插件最新状态）
+                    self._refresh_tool_status()
                     break
+
+    def _on_tool_status_updated(self, plugin_name, status_text):
+        """工具状态更新回调：拼接工具状态与框架状态统一显示
+
+        只有当前激活的插件状态才显示在状态栏；非激活插件的状态被缓存，
+        切换到该插件时再展示。
+        """
+        if plugin_name == self.current_plugin_name:
+            self.tool_status_label.setText(status_text)
+        # 非当前插件：缓存即可，切换时由 _refresh_tool_status 刷新
+
+    def _refresh_tool_status(self):
+        """刷新当前插件的状态显示"""
+        if not self.current_plugin_name:
+            self.tool_status_label.setText("")
+            return
+        status = self.plugin_manager.get_tool_status(self.current_plugin_name)
+        self.tool_status_label.setText(status)
 
     def switch_to_plugin(self, plugin_name):
         """切换到指定插件"""
@@ -487,25 +592,191 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._update_theme_ui(theme_id))
     
     def _update_theme_ui(self, theme_id):
-        """更新主题UI（在主线程中执行）"""
+        """更新主题UI（在主线程中执行）- 只刷新样式，不重建控件"""
         self._color_scheme = self.config_manager.get_color_scheme()
         
-        self.init_ui()
-        self.load_plugins()
+        # 刷新主窗口及框架控件样式
+        self._refresh_frame_styles()
         
+        # 刷新所有插件控件样式
+        self._refresh_plugin_styles()
+        
+        # 更新主题勾选状态
         if hasattr(self, '_theme_actions'):
             current_theme = self.config_manager.get_current_theme()
             for tid, action in self._theme_actions.items():
                 action.setChecked(tid == current_theme)
+
+    def _refresh_frame_styles(self):
+        """刷新框架控件（菜单栏、工具栏、状态栏、标签页）的样式"""
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        border = self._get_style('border', '#3c3c3c')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        text_primary = self._get_style('text', '#ffffff')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
+        primary = self._get_style('primary', '#007acc')
+        font_size_medium = self._get_font_size('size-lg', '13px')
+        font_size_normal = self._get_font_size('size-md', '12px')
+        border_radius_small = self._get_border_radius('sm', '4px')
+        border_radius_normal = self._get_border_radius('md', '6px')
+        
+        # 刷新主窗口样式
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                background-color: {bg_main};
+            }}
+        """)
+        
+        # 刷新中央控件
+        if hasattr(self, 'central_widget'):
+            self.central_widget.setStyleSheet(f"""
+                QWidget {{
+                    background-color: {bg_main};
+                }}
+            """)
+        
+        # 刷新插件标签页样式（统一使用主题配色，不区分标签页）
+        self.plugin_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: none;
+                background-color: {bg_main};
+            }}
+            QTabBar::tab {{
+                background-color: {bg_tertiary};
+                color: {text_secondary};
+                padding: 6px 18px;
+                border: 1px solid {border};
+                border-bottom: none;
+                margin-right: 2px;
+                margin-top: 2px;
+                border-top-left-radius: {border_radius_normal};
+                border-top-right-radius: {border_radius_normal};
+                font-size: {font_size_medium};
+                font-weight: 500;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {primary};
+                color: #ffffff;
+                border-color: {primary};
+                font-weight: bold;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background-color: {bg_input};
+                color: {text_primary};
+            }}
+        """)
+        
+        # 刷新菜单栏样式
+        if self._menu_bar_created:
+            self.create_menu_bar()
+        
+        # 刷新工具栏样式
+        if self._tool_bar_created:
+            self.create_tool_bar()
+            self.build_plugin_actions()
+        
+        # 刷新状态栏样式
+        if self._status_bar_created:
+            primary = self._get_style('primary', '#007acc')
+            self.status_bar.setStyleSheet(f"""
+                QStatusBar {{
+                    background-color: {primary};
+                    color: #ffffff;
+                }}
+                QStatusBar::item {{ border: none; }}
+            """)
+            self.status_label.setStyleSheet("color: #ffffff;")
+            self.tool_status_label.setStyleSheet("color: #ffffff; margin-left: 6px;")
+    
+    def _refresh_plugin_styles(self):
+        """通知所有插件控件刷新样式"""
+        for plugin_name, widget in self.plugin_widgets.items():
+            if hasattr(widget, 'refresh_theme_styles'):
+                try:
+                    widget.refresh_theme_styles()
+                except Exception:
+                    pass
     
     def show_about(self):
+        """显示关于对话框：仅包含版本号与主要使用场景。"""
         QMessageBox.about(
             self,
             "关于 MyDesk",
-            "MyDesk - 终端管理器\n\n"
-            "版本: 1.0.0\n\n"
-            "参照MobaXterm设计的终端管理工具"
+            f"""
+            <div style='text-align:center;'>
+                <h2 style='margin-bottom:0;'>MyDesk</h2>
+                <p style='margin-top:2px;color:#666;'>版本 {self._app_version}</p>
+            </div>
+            <hr>
+            <p><b>主要使用场景</b></p>
+            <ul>
+                <li>远程终端管理（SSH / Telnet / Serial 串口）</li>
+                <li>SFTP 文件传输与目录浏览</li>
+                <li>脚本批量执行与管理</li>
+                <li>远程编译与构建</li>
+                <li>计算器与数制 / 字符串转换</li>
+            </ul>
+            """
         )
+
+    def show_license_info(self):
+        """显示开源许可信息对话框。
+
+        基于 MyDesk 实际使用的第三方开源依赖生成简单的许可说明。
+        """
+        # 依赖列表：名称、许可证、官方主页
+        # 注：pyserial 实际为 BSD-3-Clause（非 GPL），此处以 PyPI 元数据为准
+        licenses = [
+            ("PyQt6", "GPL v3 / 商业许可",
+             "https://www.riverbankcomputing.com/software/pyqt/"),
+            ("paramiko", "LGPL v2.1",
+             "https://www.paramiko.org/"),
+            ("pyserial", "BSD-3-Clause",
+             "https://github.com/pyserial/pyserial"),
+        ]
+
+        lines = []
+        lines.append("<div style='text-align:center;'>")
+        lines.append("<h2 style='margin-bottom:2px;'>开源许可</h2>")
+        lines.append("<p style='margin-top:0;color:#666;'>MyDesk 使用的第三方开源组件</p>")
+        lines.append("</div><hr>")
+
+        for name, lic, url in licenses:
+            lines.append(
+                f"<p style='margin:8px 0;'>"
+                f"<b>{name}</b> — {lic}<br>"
+                f"<span style='color:#666;'>主页：</span>"
+                f"<a href='{url}'>{url}</a>"
+                f"</p>"
+            )
+
+        lines.append("<hr>")
+        lines.append(
+            "<p style='color:#666;font-size:11px;'>"
+            "以上许可信息均来自各项目的官方元数据。各组件的完整许可文本"
+            "请以对应项目源代码中的 LICENSE 文件为准。"
+            "</p>"
+        )
+
+        # 使用自定义对话框以支持富文本与链接交互
+        dialog = QDialog(self)
+        dialog.setWindowTitle("开源许可")
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setHtml("".join(lines))
+        layout.addWidget(text_edit)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        dialog.exec()
 
     def set_status(self, message):
         self.status_label.setText(message)

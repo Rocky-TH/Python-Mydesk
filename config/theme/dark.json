@@ -1,37 +1,42 @@
 {
     "name": "深色主题",
-    "description": "适合夜间使用的深色主题",
+    "description": "参考VSCode Dark+配色方案",
     "is_dark": true,
     
     "colors": {
-        "primary": "#007acc",
-        "primary-hover": "#005a9e",
-        "primary-pressed": "#004575",
+        "primary": "#3a8fd4",
+        "primary-hover": "#4a9fe4",
+        "primary-pressed": "#2a7fc4",
         
-        "success": "#28a745",
-        "warning": "#ffc107",
-        "danger": "#dc3545",
-        "info": "#17a2b8",
+        "success": "#4ec9b0",
+        "success-hover": "#5dd4bb",
+        "success-pressed": "#3db89f",
+        "warning": "#dcdcaa",
+        "warning-hover": "#e8e5b7",
+        "danger": "#f44747",
+        "danger-hover": "#f65a5a",
+        "info": "#569cd6",
+        "info-hover": "#6ba8db",
         
         "bg-main": "#1e1e1e",
         "bg-secondary": "#252526",
         "bg-tertiary": "#2d2d30",
-        "bg-input": "#3c3c3c",
-        "bg-input-focus": "#4c4c4c",
-        
-        "border": "#3d3d40",
-        "border-light": "#4a4a4d",
+        "bg-input": "#454545",
+        "bg-input-focus": "#3a5878",
+
+        "border": "#3c3c3c",
+        "border-light": "#4a4a4a",
         "border-focus": "#007acc",
+
+        "text": "#e0e0e0",
+        "text-secondary": "#b0b0b0",
+        "text-hint": "#858585",
+        "text-success": "#4ec9b0",
+        "text-warning": "#dcdcaa",
+        "text-danger": "#f44747",
+        "text-info": "#569cd6",
         
-        "text": "#ffffff",
-        "text-secondary": "#cccccc",
-        "text-hint": "#888888",
-        "text-success": "#00ff00",
-        "text-warning": "#ffff00",
-        "text-danger": "#ff6b6b",
-        "text-info": "#00d4ff",
-        
-        "selection": "#007acc",
+        "selection": "#264f78",
         "selection-text": "#ffffff"
     },
     
@@ -55,7 +60,7 @@
     "components": {
         "button": {
             "bg": "@primary",
-            "color": "@text",
+            "color": "#ffffff",
             "border": "none",
             "padding": "8px 16px",
             "radius": "@radius.md",
@@ -76,6 +81,90 @@
             "hover-bg": "@bg-input-focus",
             "hover-border": "@border-focus",
             "pressed-bg": "@bg-tertiary"
+        },
+        
+        "button-function": {
+            "bg": "@primary",
+            "color": "#ffffff",
+            "border": "none",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-lg",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@primary-hover",
+            "pressed-bg": "@primary-pressed"
+        },
+        
+        "button-success": {
+            "bg": "@success",
+            "color": "#ffffff",
+            "border": "none",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-lg",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@success-hover",
+            "pressed-bg": "@success-pressed"
+        },
+        
+        "button-danger": {
+            "bg": "@danger",
+            "color": "#ffffff",
+            "border": "none",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-lg",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@danger-hover",
+            "pressed-bg": "@primary-pressed"
+        },
+        
+        "button-calc-number": {
+            "bg": "@bg-input",
+            "color": "@text",
+            "border": "1px solid @border-light",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-lg",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@bg-input-focus",
+            "pressed-bg": "@bg-tertiary"
+        },
+        
+        "button-calc-function": {
+            "bg": "@primary",
+            "color": "#ffffff",
+            "border": "none",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-lg",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@primary-hover",
+            "pressed-bg": "@primary-pressed"
+        },
+        
+        "button-calc-equals": {
+            "bg": "@primary",
+            "color": "#ffffff",
+            "border": "none",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-lg",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@primary-hover",
+            "pressed-bg": "@primary-pressed"
+        },
+        
+        "button-calc-clear": {
+            "bg": "@danger",
+            "color": "#ffffff",
+            "border": "none",
+            "padding": "8px",
+            "radius": "@radius.sm",
+            "font-size": "@fonts.size-lg",
+            "font-weight": "@fonts.weight-bold",
+            "hover-bg": "@danger-hover",
+            "pressed-bg": "@primary-pressed"
         },
         
         "input": {
@@ -130,7 +219,7 @@
             "padding": "4px",
             "item-padding": "6px 24px",
             "item-selected-bg": "@primary",
-            "item-selected-color": "@text",
+            "item-selected-color": "#ffffff",
             "separator-bg": "@border-light",
             "separator-height": "1px"
         },
@@ -139,7 +228,7 @@
             "bg": "@bg-tertiary",
             "color": "@text-secondary",
             "selected-bg": "@primary",
-            "selected-color": "@text",
+            "selected-color": "#ffffff",
             "hover-bg": "@bg-input",
             "hover-color": "@text",
             "border": "@border",
@@ -161,7 +250,7 @@
         
         "group-box": {
             "color": "@text",
-            "border": "2px solid @border-light",
+            "border": "1px solid @border-light",
             "radius": "@radius.lg",
             "bg": "@bg-secondary",
             "font-size": "@fonts.size-md",

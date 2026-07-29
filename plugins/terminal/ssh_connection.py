@@ -151,6 +151,21 @@ class SSHConnection(ConnectionBase):
                 print(f"发送数据失败: {e}")
                 pass
 
+    def resize_pty(self, width=80, height=24):
+        """动态调整PTY终端大小，使远程shell感知终端实际宽度
+
+        Args:
+            width: 终端列数（columns）
+            height: 终端行数（rows）
+        """
+        if not self.connected or not self.shell:
+            return
+        try:
+            self.shell.resize_pty(width=width, height=height)
+        except Exception as e:
+            # resize 失败不影响正常使用，仅打印调试信息
+            print(f"调整PTY大小失败: {e}")
+
     def read_output(self, timeout=0.05):
         """读取远程输出（非阻塞），优化性能"""
         if not self.connected or not self.shell:

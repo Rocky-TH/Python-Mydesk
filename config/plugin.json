@@ -1,22 +1,28 @@
 {
     "plugins": [
         {
-            "name": "QuicklyCmd",
-            "display_name": "快捷命令",
-            "module": "plugins.quickly_cmd",
-            "main_class": "QuicklyCmdPlugin"
-        },
-        {
             "name": "Terminal",
             "display_name": "终端",
             "module": "plugins.terminal",
             "main_class": "TerminalPlugin"
         },
         {
+            "name": "CompileTool",
+            "display_name": "编译工具",
+            "module": "plugins.compile_tool",
+            "main_class": "CompileToolPlugin"
+        },
+        {
             "name": "ScriptManager",
             "display_name": "脚本管理",
             "module": "plugins.script_manager",
             "main_class": "ScriptManagerPlugin"
+        },
+        {
+            "name": "CalcTool",
+            "display_name": "计算工具",
+            "module": "plugins.calc_tool",
+            "main_class": "CalcToolPlugin"
         },
         {
             "name": "RemoteCmd",
@@ -28,5 +34,10 @@
     "settings": {
         "default_session_timeout": 30,
         "max_connections": 10
+    },
+    "app_config": {
+        "icon": "assets/icons/computer.jpeg",
+        "title": "MyDesk",
+        "version": "1.0.0"
     }
 }

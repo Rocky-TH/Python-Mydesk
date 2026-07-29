@@ -36,7 +36,7 @@ class RemoteCmdPlugin:
     def get_compile_environments(self):
         """获取编译环境配置（包含远程连接信息）"""
         if self._config_manager:
-            plugin_config = self._config_manager.get_plugin_config("QuicklyCmd")
+            plugin_config = self._config_manager.get_plugin_config("CompileTool")
             if plugin_config and 'compile' in plugin_config:
                 return plugin_config['compile'].get('compile_environments', [])
         return []
