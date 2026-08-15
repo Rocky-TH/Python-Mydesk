@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Modbus 从站配置示例 -->
+<!-- 标签说明： -->
+<!--   coil              线圈（可读写，功能码 0x01/0x05/0x0F） -->
+<!--   discrete_input    离散输入（只读，功能码 0x02） -->
+<!--   holding_register  保持寄存器（可读写，功能码 0x03/0x06/0x10） -->
+<!--   input_register    输入寄存器（只读，功能码 0x04） -->
+<modbus>
+    <coil address="0" value="1"/>
+    <coil address="1" value="0"/>
+    <coil address="2" value="1"/>
+    <coil address="3" value="1"/>
+    <coil address="4" value="0"/>
+    <discrete_input address="0" value="1"/>
+    <discrete_input address="1" value="0"/>
+    <discrete_input address="2" value="1"/>
+    <holding_register address="0" value="100"/>
+    <holding_register address="1" value="200"/>
+    <holding_register address="2" value="300"/>
+    <holding_register address="10" value="1000"/>
+    <holding_register address="11" value="2000"/>
+    <input_register address="0" value="500"/>
+    <input_register address="1" value="600"/>
+    <input_register address="2" value="700"/>
+</modbus>

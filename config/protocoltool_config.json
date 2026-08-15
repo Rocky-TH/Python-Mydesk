@@ -1,0 +1,12 @@
+{
+    "name": "ProtocolTool",
+    "display_name": "协议测试",
+    "version": "1.0.0",
+    "description": "协议测试工具，支持串口/TCP客户端/TCP服务端连接，十六进制与字符串收发、CRC校验、定时发送",
+    "settings": {
+        "default_baud": 115200,
+        "default_tcp_port": 8080,
+        "default_buffer_size": 4096,
+        "log_dir": "logs/protocol_tool"
+    }
+}

@@ -123,9 +123,9 @@ class ConfigManager:
             # 插件数据目录为空，数据直接存储在config根目录
             self._plugin_data[plugin_name] = {}
         
-        # 加载公共数据文件（如 connections.json）
-        # connections.json 属于 Terminal 插件
-        terminal_data_files = ['connections']
+        # 加载公共数据文件（如 connections.json, sftp_shortcuts.json）
+        # 这些数据文件均归属于 Terminal 插件
+        terminal_data_files = ['connections', 'sftp_shortcuts']
         for filename in os.listdir(self._config_dir):
             if filename.endswith('.json') and filename not in ['plugin.json'] and '_config.json' not in filename:
                 data_file = os.path.join(self._config_dir, filename)

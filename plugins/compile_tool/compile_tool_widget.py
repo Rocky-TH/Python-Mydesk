@@ -372,7 +372,7 @@ class CompileToolWidget(QWidget):
         font_size = self.get_font_size('size-md', '12px')
         self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {font_size}; font-weight: 500;")
         self.detail_text.setWordWrap(True)
-        self.detail_text.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.detail_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail_layout.addWidget(self.detail_text)
 
         layout.addWidget(detail_group)

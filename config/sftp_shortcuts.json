@@ -1,0 +1,11 @@
+[
+    {
+        "name": "example",
+        "path": "/pub/example"
+    },
+    {
+        "name": "Mydesk",
+        "path": "D:\\Project\\MyDesk\\MyDesk",
+        "type": "local"
+    }
+]

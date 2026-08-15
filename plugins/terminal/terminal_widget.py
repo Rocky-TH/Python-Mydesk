@@ -1,4 +1,5 @@
 import os
+import posixpath
 import re
 import threading
 import time
@@ -12,8 +13,8 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QFileDialog, QProgressDialog, QApplication,
     QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QMimeData
-from PyQt6.QtGui import QFont, QAction, QTextCursor, QColor, QKeyEvent, QTextCharFormat, QCursor, QFontMetrics
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
+from PyQt6.QtGui import QFont, QAction, QTextCursor, QColor, QKeyEvent, QTextCharFormat, QCursor
 from .connection_context import ConnectionContext
 from .ssh_connection import SSHConnection
 from .telnet_connection import TelnetConnection
@@ -120,9 +121,10 @@ class TerminalEdit(QTextEdit):
     input_method_text = pyqtSignal(str)
     paste_text = pyqtSignal(str)
 
-    def __init__(self, color_scheme=None, parent=None):
+    def __init__(self, color_scheme=None, config_manager=None, parent=None):
         super().__init__(parent)
         self._color_scheme = color_scheme or {}
+        self._config_manager = config_manager
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.set_style()
 
@@ -141,6 +143,76 @@ class TerminalEdit(QTextEdit):
             }}
         """)
 
+    def _get_menu_style(self):
+        """获取适配主题的右键菜单 CSS 样式"""
+        if self._config_manager:
+            return self._config_manager.get_menu_css()
+        # 降级：使用 color_scheme 中的颜色构建菜单样式
+        bg = self._color_scheme.get('bg-tertiary', '#2d2d30')
+        color = self._color_scheme.get('text', '#ffffff')
+        border = self._color_scheme.get('border-light', '#4a4a4d')
+        item_selected_bg = self._color_scheme.get('primary', '#007acc')
+        return f"""
+            QMenu {{
+                background-color: {bg};
+                color: {color};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px;
+                min-width: 100px;
+                color: {color};
+            }}
+            QMenu::item:selected {{
+                background-color: {item_selected_bg};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {border};
+                margin: 4px 0;
+            }}
+        """
+
+    def contextMenuEvent(self, event):
+        """重写右键菜单事件，创建适配主题的自定义菜单"""
+        from PyQt6.QtGui import QAction, QCursor
+        from PyQt6.QtWidgets import QMenu, QApplication
+
+        menu = QMenu(self)
+        menu.setStyleSheet(self._get_menu_style())
+
+        # 复制选中内容
+        copy_action = QAction("复制", self)
+        copy_action.setEnabled(self.textCursor().hasSelection())
+        def do_copy():
+            selected = self.textCursor().selectedText()
+            if selected:
+                QApplication.clipboard().setText(selected)
+        copy_action.triggered.connect(do_copy)
+        menu.addAction(copy_action)
+
+        # 全选
+        select_all_action = QAction("全选", self)
+        select_all_action.triggered.connect(self.selectAll)
+        menu.addAction(select_all_action)
+
+        menu.addSeparator()
+
+        # 粘贴（使用自定义 paste 处理，保证文本发送到远端）
+        paste_action = QAction("粘贴", self)
+        def do_paste():
+            clipboard = QApplication.clipboard()
+            text = clipboard.text()
+            if text:
+                self.paste_text.emit(text)
+        paste_action.triggered.connect(do_paste)
+        menu.addAction(paste_action)
+
+        menu.exec(event.globalPos())
+
     def keyPressEvent(self, event):
         """拦截所有键盘事件并发送给父组件处理"""
         self.key_pressed.emit(event)
@@ -151,6 +223,7 @@ class TerminalEdit(QTextEdit):
         if event.type() == event.Type.KeyPress:
             if event.key() == Qt.Key.Key_Tab:
                 self.key_pressed.emit(event)
+                event.accept()
                 return True
         return super().event(event)
 
@@ -161,50 +234,17 @@ class TerminalEdit(QTextEdit):
             self.input_method_text.emit(text)
         # 不调用super，避免文本被默认处理插入两次
 
-    def canInsertFromMimeData(self, source):
-        """允许粘贴操作（右键菜单Paste可用）"""
-        return True
+    def pasteEvent(self, event):
+        """拦截粘贴事件，通过信号交由父组件统一处理
 
-    def insertFromMimeData(self, source):
-        """拦截所有粘贴操作（Ctrl+V若漏过、右键菜单粘贴），通过信号交由父组件处理
-
-        QTextEdit 没有 pasteEvent，粘贴统一走 insertFromMimeData。
-        重写此方法确保粘贴内容发送到远程shell而非仅插入UI。
+        避免右键菜单粘贴的内容只显示在UI上而没有真正发送到远程shell。
         """
-        text = source.text()
-        if text:
-            self.paste_text.emit(text)
-        # 不调用super，避免文本被默认插入到显示控件
-
-    def createMimeDataFromSelection(self):
-        """重写以只提供纯文本格式，避免 QTextEdit 默认提供 text/html、text/markdown、
-        application/vnd.oasis.opendocument.text 等富文本 MIME 类型。
-
-        Windows 下当其他程序占用剪贴板时，设置多种 MIME 数据会触发
-        OleSetClipboard COM 错误 0x800401d0 (CLIPBRD_E_CANT_OPEN)。
-        只设置 text/plain 可大幅降低出错概率。
-        """
-        mime = QMimeData()
-        mime.setText(self.textCursor().selectedText())
-        return mime
-
-    def copy(self):
-        """重写 copy：只设置纯文本到剪贴板，并加入重试机制处理剪贴板被占用的情况"""
-        text = self.textCursor().selectedText()
-        if not text:
-            return
+        from PyQt6.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
-        # 剪贴板可能被其他程序临时占用，重试3次
-        for attempt in range(3):
-            try:
-                clipboard.setText(text)
-                return
-            except Exception:
-                time.sleep(0.05)
-
-    def cut(self):
-        """重写 cut：终端内容不允许剪切，仅复制"""
-        self.copy()
+        paste_text = clipboard.text()
+        if paste_text:
+            self.paste_text.emit(paste_text)
+        event.accept()
 
 
 class ConnectionWorker(QThread):
@@ -284,17 +324,22 @@ class ButtonExecutionWorker(QThread):
 
 class SessionTab(QWidget):
     """单个会话标签页 - 交互式终端"""
-    def __init__(self, session_id, session_name, color_scheme=None, parent=None):
+    def __init__(self, session_id, session_name, color_scheme=None, config_manager=None, parent=None):
         super().__init__(parent)
         self.session_id = session_id
         self.session_name = session_name
         self._color_scheme = color_scheme or {}
+        self._config_manager = config_manager
         self.connection_context = ConnectionContext()
         self.current_connection = None
         self.command_history = []
         self.history_index = -1
         self.current_input = ""
         self.interactive_mode = False
+        self._tab_pending = False  # Tab补全等待标志：下次输出时从display提取补全结果
+        # 本地回显消重队列：交互模式下，为消除"输入不及时显示"，用户按键时先本地write_output回显；
+        # 等服务器回显到来时，从回显文本头部吸收掉与本地echo相同的部分，防止双显。
+        self._local_echo_sent = ""
         # 使用主题文字颜色作为ANSI解析器默认前景色
         text_hex = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#cccccc'))
         # 根据背景色亮度判断主题模式，决定ANSI颜色映射
@@ -347,7 +392,7 @@ class SessionTab(QWidget):
         border = self._color_scheme.get('border', '#3c3c3c')
         border_focus = self._color_scheme.get('border-focus', self._color_scheme.get('border_focus', '#007acc'))
         
-        self.terminal_display = TerminalEdit(self._color_scheme)
+        self.terminal_display = TerminalEdit(self._color_scheme, self._config_manager)
         self.terminal_display.setFont(QFont("Consolas", 11))
         self.terminal_display.key_pressed.connect(self.handle_key_press)
         self.terminal_display.input_method_text.connect(self.handle_input_method_text)
@@ -404,6 +449,7 @@ class SessionTab(QWidget):
             return
 
         # 基于字体度量计算终端可显示的列数和行数
+        from PyQt6.QtGui import QFontMetrics
         font = self.terminal_display.font()
         fm = QFontMetrics(font)
 
@@ -604,6 +650,12 @@ class SessionTab(QWidget):
             fmt.setForeground(QColor(resolved))
             cursor.setCharFormat(fmt)
             self._insert_text_with_cr(cursor, text)
+            # —— color 分支代表"程序主动写入的系统提示文本"（非服务器ANSI回显）
+            #    完成后强制重置 cursor 格式 + ANSI parser 格式，
+            #    避免颜色格式残留，污染后续服务器返回的 ANSI 输出。
+            if self.ansi_parser.enable_color:
+                self.ansi_parser.reset_format()
+                cursor.setCharFormat(self.ansi_parser.get_current_format())
         else:
             # 使用ANSI解析器处理转义序列
             parts = self.ansi_parser.parse(text)
@@ -616,11 +668,20 @@ class SessionTab(QWidget):
         if self._should_scroll():
             self.terminal_display.ensureCursorVisible()
 
-        # 更新current_input：提取最后一行中提示符后的内容
-        self._update_current_input_from_display()
+        # 更新current_input：仅在Tab补全等待状态下从显示内容提取
+        # 交互模式下current_input由本地按键追踪维护，减少对display解析的依赖
+        if getattr(self, '_tab_pending', False):
+            self._update_current_input_from_display()
+            self._tab_pending = False
 
     def _update_current_input_from_display(self):
-        """从显示内容中更新current_input（处理Tab补全等场景）"""
+        """从显示内容中更新current_input（处理Tab补全等场景）
+
+        策略：**只在最后一行能明确识别到提示符时才更新**，
+        任何识别失败的情况都直接返回，绝不修改 current_input，
+        避免"把服务器输出当作用户输入"或"错误清空current_input"导致的删除异常。
+        """
+        import re
         plain_text = self.terminal_display.toPlainText()
         lines = plain_text.split('\n')
         if not lines:
@@ -629,10 +690,13 @@ class SessionTab(QWidget):
         last_line = lines[-1]
 
         # 查找提示符位置（常见提示符：# $ > %）
-        prompt_patterns = [r'^\s*[\w@]+[\s]*[:][\s]*[\w/~.-]*\s*[#$>%]\s*', r'^\s*[#$>%]\s*']
+        prompt_patterns = [
+            r'^\s*[\w@.-]+[\s]*:[\s]*[\w/~.@-]*\s*[#$>%]\s*',  # user@host:path$ 形式
+            r'^\s*[A-Za-z0-9_.\-]+[#$>%]\s+',                    # 简化提示符 xxx$ 
+            r'^\s*[#$>%]\s+',                                      # 最简 $ 
+        ]
 
         for pattern in prompt_patterns:
-            import re
             match = re.match(pattern, last_line)
             if match:
                 self.current_input = last_line[match.end():]
@@ -640,17 +704,12 @@ class SessionTab(QWidget):
                 if self.ansi_parser.enable_color:
                     self.ansi_parser.reset_format()
                 return
-        
-        # 如果没有找到提示符，保留当前输入
-        if last_line.strip():
-            # 检查是否有之前的行可能包含提示符
-            for i in range(len(lines)-1, max(0, len(lines)-5), -1):
-                line = lines[i]
-                for pattern in prompt_patterns:
-                    match = re.match(pattern, line)
-                    if match:
-                        self.current_input = last_line
-                        return
+
+        # ============================================================
+        # 未找到提示符 → 保守策略：直接 return，保持原来的 current_input 不变
+        # 不做"往前5行回溯查找 + 强制赋值last_line"这类高风险操作
+        # ============================================================
+        return
 
     def _should_scroll(self):
         """判断是否需要滚动到可见区域"""
@@ -697,7 +756,10 @@ class SessionTab(QWidget):
                         cursor.removeSelectedText()
                     i += 1
             elif text[i] == '\x7f':
-                if cursor.position() < cursor.document().characterCount() - 1:
+                # DEL：删除光标右侧字符；只要还没到文档真正末尾（characterCount包含末尾不可见段落标记）
+                # 就允许删除（避免原条件 position < count-1 把"倒数第一个可见字符前"的删除也拦截掉）
+                total = cursor.document().characterCount()
+                if cursor.position() < total - 1:  # 右侧至少还有一个真正可见的字符
                     cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
                     cursor.removeSelectedText()
                 i += 1
@@ -865,52 +927,149 @@ class SessionTab(QWidget):
                 break
             parent = parent.parent()
 
+    @staticmethod
+    def _strip_ansi(s):
+        """移除字符串中的 ANSI 转义序列（CSI、OSC 等），返回纯文本。
+
+        用于服务器回显与本地echo对比（本地echo不含ANSI）。
+        """
+        import re
+        # CSI：\x1b [ ... [a-zA-Z@]   OSC：\x1b ] ... \x07 / \x1b \\
+        # 以及 Fe 单字控制符（单独ESC加一个字母）：简单处理
+        s = re.sub(r'\x1b\[[0-9:;<=>?]*[ -/]*[@-~]', '', s)  # CSI
+        s = re.sub(r'\x1b\][^\x07]*(\x07|\x1b\\)', '', s)     # OSC 终止于 BEL 或 ST
+        s = re.sub(r'\x1b[][A-Za-z0-9^_]', '', s)             # 简单Fe序列
+        return s
+
+    def _echo_suppress(self, raw_data):
+        """echo suppression（回显消重）
+
+        交互模式下用户按键时本地已即时回显，服务器回显到达时需要消重。
+        支持部分匹配：服务器可能分多次发送回显（逐字符或分块），只要
+        raw_data 的纯文本前缀与 _local_echo_sent 的前缀有公共部分就消耗它。
+
+        返回：(剩余文本, 是否消耗了echo)
+        """
+        echo = getattr(self, '_local_echo_sent', '')
+        if not echo:
+            return raw_data, False
+        stripped = self._strip_ansi(raw_data)
+        if not stripped:
+            return raw_data, False
+
+        # ---- 计算最长公共前缀 ----
+        common_len = 0
+        min_len = min(len(stripped), len(echo))
+        while common_len < min_len and stripped[common_len] == echo[common_len]:
+            common_len += 1
+
+        if common_len == 0:
+            # 无任何公共前缀 → 服务器输出了其他内容，echo 过期
+            self._local_echo_sent = ""
+            return raw_data, False
+
+        # ---- 从 raw_data 中消耗 common_len 个非 ANSI 字符 ----
+        consume_count = common_len
+        i = 0
+        seen = 0
+        n = len(raw_data)
+        while i < n and seen < consume_count:
+            c = raw_data[i]
+            if c == '\x1b':
+                if i + 1 < n and raw_data[i + 1] == '[':
+                    j = i + 2
+                    while j < n:
+                        if raw_data[j].isalpha() or raw_data[j] == '@':
+                            i = j + 1
+                            break
+                        j += 1
+                    else:
+                        i += 1
+                elif i + 1 < n and raw_data[i + 1] == ']':
+                    j = i + 2
+                    while j < n:
+                        if raw_data[j] == '\x07':
+                            i = j + 1
+                            break
+                        if raw_data[j] == '\x1b' and j + 1 < n and raw_data[j + 1] == '\\':
+                            i = j + 2
+                            break
+                        j += 1
+                    else:
+                        i += 1
+                else:
+                    i += 2
+            else:
+                seen += 1
+                i += 1
+
+        # 保留 echo 中未被消耗的尾部，供下次消重使用
+        self._local_echo_sent = echo[common_len:]
+        return raw_data[i:], True
+
     def _flush_output_buffer(self):
-        """刷新输出缓冲区，处理不完整的ANSI序列和退格序列"""
+        """刷新输出缓冲区，处理不完整的ANSI序列
+
+        关键修复：
+        1) 删除"退格序列等待"逻辑——\b 本身是单字符完整的控制符，不需要等待，
+           否则会出现"按Backspace界面不更新，卡住一段时间"的错觉/死等。
+        2) ANSI CSI 序列完整性判断：结尾字符只需是字母 [a-zA-Z@]，
+           原正则把 CSI 结尾字母枚举不全，并且混入了毫无意义的 `|n$`，
+           导致大量合法 CSI 序列被错误判定为"不完整"，永远滞留在缓冲区。
+        3) 本地即时回显 + echo suppression：用户按键时本地立刻显示，
+           服务器回显到达时消重，既消除输入延迟感，又避免双显。
+        """
         if not self._output_buffer:
             return
 
-        # 检查退格序列是否完整
-        # 标准退格序列：\b \b 或 \b(单独)
-        # 如果缓冲区末尾有 \b，等待更多数据以确保序列完整
-        buffer_len = len(self._output_buffer)
-        if buffer_len >= 1 and self._output_buffer[-1] == '\b':
-            # 如果最后是 \b，检查是否完整
-            if buffer_len >= 3 and self._output_buffer[-3] == '\b' and self._output_buffer[-2] == ' ':
-                # \b \b 序列完整，可以输出
-                pass
-            elif buffer_len >= 2 and self._output_buffer[-2] == '\b':
-                # \b\b 序列完整，可以输出
-                pass
-            else:
-                # 不完整的退格序列，等待更多数据
-                return
-
+        # ============================================================
+        # 1. 缓冲区末尾只有单独 ESC (\x1b) —— 等后续字符再判断序列类型
+        # ============================================================
         if self._output_buffer.endswith('\x1b'):
-            self.write_output(self._output_buffer[:-1])
+            complete_part = self._output_buffer[:-1]
             self._output_buffer = '\x1b'
+            if complete_part:
+                complete_part, _ = self._echo_suppress(complete_part)
+                if complete_part:
+                    self.write_output(complete_part)
             return
 
+        # ============================================================
+        # 2. 缓冲区中包含 ESC，判断最后一个转义序列是否完整
+        # ============================================================
         last_esc = self._output_buffer.rfind('\x1b')
         if last_esc != -1:
             after_esc = self._output_buffer[last_esc:]
+            # 2a) CSI 序列：\x1b [ 参数 ; 参数 ... 结尾字母([a-zA-Z@])
             if len(after_esc) >= 2 and after_esc[1] == '[':
-                if not re.search(r'[mHKABCDsufrJLMXP@Zc]|n$', after_esc):
+                # 判断是否以合法 CSI 结尾字符收尾（字母 A-Za-z 或 @）
+                if len(after_esc) < 3 or not (after_esc[-1].isalpha() or after_esc[-1] == '@'):
+                    # 序列不完整 → 输出 ESC 前的内容，把不完整序列留在缓冲区
                     complete_part = self._output_buffer[:last_esc]
                     self._output_buffer = after_esc
                     if complete_part:
-                        self.write_output(complete_part)
+                        complete_part, _ = self._echo_suppress(complete_part)
+                        if complete_part:
+                            self.write_output(complete_part)
                     return
+            # 2b) 只有单独 ESC （尚未出现后续控制字符）
             elif len(after_esc) == 1:
                 complete_part = self._output_buffer[:last_esc]
                 self._output_buffer = after_esc
                 if complete_part:
-                    self.write_output(complete_part)
+                    complete_part, _ = self._echo_suppress(complete_part)
+                    if complete_part:
+                        self.write_output(complete_part)
                 return
 
+        # ============================================================
+        # 3. 缓冲区数据完整 → echo suppression 后全部输出
+        # ============================================================
         complete_data = self._output_buffer
         self._output_buffer = ""
-        self.write_output(complete_data)
+        complete_data, _ = self._echo_suppress(complete_data)
+        if complete_data:
+            self.write_output(complete_data)
 
     def handle_key_press(self, event):
         """处理键盘事件"""
@@ -957,10 +1116,13 @@ class SessionTab(QWidget):
         if key == Qt.Key.Key_Up:
             if has_raw:
                 strategy.send_raw("\x1b[A")
+                # 上下方向键浏览历史命令，需要从display提取服务器回显的内容
+                self._tab_pending = True
             return
         elif key == Qt.Key.Key_Down:
             if has_raw:
                 strategy.send_raw("\x1b[B")
+                self._tab_pending = True
             return
         elif key == Qt.Key.Key_Left:
             if has_raw:
@@ -992,6 +1154,8 @@ class SessionTab(QWidget):
         if key == Qt.Key.Key_Tab:
             if has_raw:
                 strategy.send_raw("\t")
+                # 设置Tab补全等待标志，下次输出时从display提取补全后的内容
+                self._tab_pending = True
             return
 
         if key == Qt.Key.Key_Escape:
@@ -1002,6 +1166,15 @@ class SessionTab(QWidget):
         if key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
             if has_raw:
                 strategy.send_raw("\n")
+                # 本地即时回显换行：避免用户按回车后没有视觉反馈，消除"按回车没反应"的卡顿感
+                self.write_output('\n', 'text')
+                # 追踪 \r\n 用于 echo suppression（服务器回显通常为 \r\n，与本地回显的 \n 对齐消重）
+                self._local_echo_sent += '\r\n'
+                # 交互模式下清空本地输入追踪 + 重置ANSI颜色格式
+                # （作为颜色泄漏的防护层：命令提交时强制重置一次，防止上一条命令的颜色泄漏到下一条）
+                self.current_input = ""
+                if self.ansi_parser.enable_color:
+                    self.ansi_parser.reset_format()
             else:
                 self.execute_command()
             return
@@ -1009,7 +1182,19 @@ class SessionTab(QWidget):
         # 退格 / 删除
         if key == Qt.Key.Key_Backspace:
             if has_raw:
+                # 交互模式下始终发送退格符，交给服务器维护真正的输入缓冲区
+                # （避免因 current_input 与服务器回显不同步，导致"门禁判断"把退格拦截，造成删不掉）
                 strategy.send_raw(self._get_backspace_char())
+                # 本地仅做"尽力而为"的同步截断：非空时才删，防止负索引
+                if self.current_input:
+                    self.current_input = self.current_input[:-1]
+                # 本地即时显示退格效果：\b 移动光标 + 空格覆盖 + 再 \b 移回
+                #   —— 避免用户感觉"按了退格键没反应"，要等服务器回显才更新
+                self.write_output('\b \b', 'text')
+                # 同步维护本地echo消重队列：如果有尚未被服务器吸收的本地echo，
+                # 把最末尾的一个字符砍掉，保证后续服务器回显消重时长度一致。
+                if self._local_echo_sent:
+                    self._local_echo_sent = self._local_echo_sent[:-1]
             elif len(self.current_input) > 0:
                 self.current_input = self.current_input[:-1]
                 self.redraw_input_line()
@@ -1023,6 +1208,12 @@ class SessionTab(QWidget):
         if text:
             if has_raw:
                 strategy.send_raw(text)
+                # 交互模式下本地追踪用户输入，与服务器回显分离维护
+                self.current_input += text
+                # 本地即时回显：保证用户一按键就能看到字符，消除"输入不及时显示"的延迟感。
+                # 后续服务器回显到达时，会通过 _local_echo_sent 匹配消重，避免双显。
+                self.write_output(text, 'text')
+                self._local_echo_sent += text
             else:
                 self.current_input += text
                 self.write_output(text, 'text')
@@ -1050,8 +1241,12 @@ class SessionTab(QWidget):
         has_raw = hasattr(strategy, 'send_raw') and self.interactive_mode
 
         if has_raw:
+            # 交互模式下本地追踪输入法文本，与服务器回显分离维护
             self.current_input += text
             strategy.send_raw(text)
+            # 本地即时回显：消除中文输入法提交时的显示延迟
+            self.write_output(text, 'text')
+            self._local_echo_sent += text
         else:
             self.current_input += text
             self.write_output(text, self._get_style('text', '#e0e0e0'))
@@ -1073,9 +1268,16 @@ class SessionTab(QWidget):
         if has_raw:
             # 交互模式：直接发送（包括其中的换行符会触发远程执行）
             strategy.send_raw(text)
-            # 同步回显到 current_input（仅保留最后一行内容用于回显）
+            # 本地追踪输入：仅保留最后一行内容（前面的行已随换行符执行）
             lines = text.split('\n')
             self.current_input = lines[-1] if lines else ''
+            # 如果包含换行符，说明已有命令被执行，最后一行是新命令开头
+            if '\n' in text:
+                # 标记需要从display提取（可能包含补全/提示信息）
+                self._tab_pending = True
+            # 本地即时回显：让粘贴内容立即显示（防止网络卡顿导致无反馈）
+            self.write_output(text, 'text')
+            self._local_echo_sent += text
         else:
             # 非交互模式：若包含换行，逐条执行；否则追加到输入
             if '\n' in text:
@@ -1192,6 +1394,8 @@ class SessionTab(QWidget):
         self._output_history.clear()  # 清空输出历史，开始新会话
         self._output_buffer = ""
         self._connection_lost = False  # 重置连接中断标志
+        self._tab_pending = False  # 重置Tab补全等待标志
+        self.current_input = ""  # 重置本地输入追踪
 
         # 恢复标签页标题（移除中断标记）
         parent = self.parent()
@@ -1882,7 +2086,7 @@ class TerminalWidget(QWidget):
                 self.empty_page = None
         
         # 创建会话标签
-        tab = SessionTab(session_id, conn.get('name', '会话'), self._color_scheme)
+        tab = SessionTab(session_id, conn.get('name', '会话'), self._color_scheme, self._config_manager)
 
         # 同步颜色显示开关状态到新会话的ANSI解析器
         tab.ansi_parser.enable_color = getattr(self, 'color_enabled', True)
@@ -2787,10 +2991,13 @@ class ConnectionDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
+        # 先调用on_type_changed初始化布局（设置默认端口），
+        # 再调用load_connection_config覆盖实际配置（包括端口），
+        # 避免编辑模式加载的端口被on_type_changed重置为默认值22
+        self.on_type_changed(self.type_combo.currentText())
+
         if self.connection:
             self.load_connection_config()
-
-        self.on_type_changed(self.type_combo.currentText())
 
     def _clear_config_layout(self):
         """清空动态配置区布局（保留预创建的输入控件，仅删除行容器及一次性标签）"""
@@ -2954,12 +3161,245 @@ class SFTPDialog(QDialog):
         self.current_remote_dir = "/home/"
         self._config_manager = config_manager
         self._color_scheme = self._get_color_scheme(parent)
+        # 加载SFTP快捷路径列表（持久化到 config/sftp_shortcuts.json）
+        self._shortcuts = self._load_shortcuts()
         self.init_ui()
         # 延迟初始化SFTP连接：先显示弹窗，再异步建立连接，避免启动卡顿
         text_hint = self._get_style('text-hint', '#858585')
         self.status_label.setText("SFTP状态: 正在连接...")
         self.status_label.setStyleSheet(f"color: {text_hint}; font-weight: bold; font-size: 13px;")
         QTimer.singleShot(0, self.init_sftp)
+
+    # ========== 快捷路径管理 ==========
+    _SHORTCUTS_PLUGIN = 'Terminal'
+    _SHORTCUTS_DATA_KEY = 'sftp_shortcuts'
+
+    def _load_shortcuts(self):
+        """从ConfigManager加载快捷路径列表"""
+        if self._config_manager:
+            data = self._config_manager.get_plugin_data(
+                self._SHORTCUTS_PLUGIN, self._SHORTCUTS_DATA_KEY)
+            if isinstance(data, list):
+                return data
+        return []
+
+    def _save_shortcuts(self):
+        """保存快捷路径列表到ConfigManager"""
+        if not self._config_manager:
+            return
+        self._config_manager.set_plugin_data(
+            self._SHORTCUTS_PLUGIN, self._SHORTCUTS_DATA_KEY, self._shortcuts)
+        self._config_manager.save_plugin_data(
+            self._SHORTCUTS_PLUGIN, self._SHORTCUTS_DATA_KEY)
+
+    def _render_shortcuts(self):
+        """重新渲染快捷路径按钮区域（保留 + 按钮在末尾）"""
+        # 清空布局中现有widget（保留add_btn在末尾重新添加）
+        while self.shortcuts_layout.count():
+            item = self.shortcuts_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+        # 快捷路径按钮：点击根据类型跳转（服务器路径或本地路径）
+        for idx, sc in enumerate(self._shortcuts):
+            name = sc.get('name', sc.get('path', ''))
+            path = sc.get('path', '')
+            sc_type = sc.get('type', 'remote')  # 默认兼容旧数据为 remote
+            btn = QPushButton(name)
+            # tooltip 显示类型和路径
+            type_label = "本地路径" if sc_type == 'local' else "服务器路径"
+            btn.setToolTip(f"[{type_label}] {path}")
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            # 使用闭包捕获path和type，避免循环变量引用问题
+            if sc_type == 'local':
+                btn.clicked.connect(lambda _checked=False, p=path: self._jump_to_local_shortcut(p))
+            else:
+                btn.clicked.connect(lambda _checked=False, p=path: self._jump_to_shortcut(p))
+            btn.customContextMenuRequested.connect(
+                lambda _pos=None, idx=idx: self._show_shortcut_menu(idx))
+            btn.setFixedHeight(20)  # 紧凑高度
+            self._style_shortcut_btn(btn)
+            self.shortcuts_layout.addWidget(btn)
+
+        # 末尾固定的 + 按钮，用于新增快捷路径
+        self.add_shortcut_btn = QPushButton("+")
+        self.add_shortcut_btn.setToolTip("新增快捷路径")
+        self.add_shortcut_btn.setFixedSize(20, 20)  # 紧凑方形
+        self.add_shortcut_btn.clicked.connect(self._add_shortcut_dialog)
+        self._style_shortcut_btn(self.add_shortcut_btn)
+        self.shortcuts_layout.addWidget(self.add_shortcut_btn)
+        # 末尾弹性空间，使按钮左对齐
+        self.shortcuts_layout.addStretch(1)
+
+    def _style_shortcut_btn(self, btn):
+        """为快捷路径按钮应用主题样式（深灰背景，紧凑尺寸）"""
+        if self._config_manager:
+            btn_css = self._config_manager.get_button_css('button-secondary')
+            if btn_css:
+                # 在主题CSS基础上叠加紧凑尺寸（覆盖 padding/min-height）
+                btn_css += """
+                    QPushButton {
+                        padding: 0px 6px;
+                        font-size: 11px;
+                        min-height: 20px;
+                        max-height: 20px;
+                    }
+                """
+                btn.setStyleSheet(btn_css)
+                return
+        # 默认样式：深灰背景，紧凑尺寸
+        bg = self._get_style('bg-tertiary', '#2d2d30')
+        text = self._get_style('text', '#ffffff')
+        border = self._get_style('border', '#3c3c3c')
+        primary = self._get_style('primary', '#007acc')
+        primary_hover = self._get_style('primary-hover', '#005a9e')
+        primary_pressed = self._get_style('primary-pressed', '#004575')
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg};
+                color: {text};
+                border: 1px solid {border};
+                padding: 0px 6px;
+                font-size: 11px;
+                border-radius: 3px;
+                min-height: 20px;
+                max-height: 20px;
+            }}
+            QPushButton:hover {{
+                background-color: {primary};
+                color: #ffffff;
+                border-color: {primary};
+            }}
+            QPushButton:pressed {{
+                background-color: {primary_pressed};
+                color: #ffffff;
+            }}
+        """)
+
+    def _style_operation_btn(self, btn):
+        """为下方操作按钮（上传/下载/刷新/关闭）应用紧凑主题样式"""
+        if self._config_manager:
+            # 在主题 button 样式基础上叠加紧凑参数
+            btn_css = self._config_manager.get_button_css('button')
+            if btn_css:
+                btn_css += """
+                    QPushButton {
+                        padding: 2px 14px;
+                        font-size: 12px;
+                        min-height: 20px;
+                        max-height: 24px;
+                    }
+                """
+                btn.setStyleSheet(btn_css)
+                return
+        # 默认紧凑样式（蓝色背景，对齐全局 setStyleSheet 中 QPushButton 但更紧凑）
+        primary = self._get_style('primary', '#007acc')
+        primary_hover = self._get_style('primary-hover', '#005a9e')
+        primary_pressed = self._get_style('primary-pressed', '#004575')
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {primary};
+                color: #ffffff;
+                border: none;
+                padding: 2px 14px;
+                font-size: 12px;
+                font-weight: bold;
+                border-radius: 4px;
+                min-height: 20px;
+                max-height: 24px;
+            }}
+            QPushButton:hover {{ background-color: {primary_hover}; }}
+            QPushButton:pressed {{ background-color: {primary_pressed}; }}
+        """)
+
+    def _jump_to_shortcut(self, path):
+        """跳转到快捷路径指定的远程目录"""
+        if not self.sftp or not path:
+            return
+        try:
+            # 验证目标路径存在并切换
+            self.sftp.stat(path)
+            self.current_remote_dir = path
+            self.remote_path.setText(self.current_remote_dir)
+            self.refresh()
+            self._set_status(f"SFTP状态: 已跳转 - {path}",
+                             self._get_style('text-success', '#4ec9b0'))
+        except Exception as e:
+            self._set_status(f"SFTP状态: 路径无效 ({str(e)})",
+                             self._get_style('text-danger', '#f44747'))
+
+    def _jump_to_local_shortcut(self, path):
+        """切换本地路径到快捷路径指定的目录"""
+        if not path or not os.path.isdir(path):
+            self._set_status(f"SFTP状态: 本地路径无效 - {path}",
+                             self._get_style('text-danger', '#f44747'))
+            return
+        SFTPDialog._last_upload_dir = path
+        SFTPDialog._last_download_dir = path
+        self.local_path.setText(path)
+        self._set_status(f"SFTP状态: 本地路径已切换 - {path}",
+                         self._get_style('text-success', '#4ec9b0'))
+
+    def _browse_local_dir(self):
+        """浏览选择本地目录"""
+        local_dir = QFileDialog.getExistingDirectory(
+            self, "选择本地目录", SFTPDialog._last_upload_dir)
+        if local_dir:
+            SFTPDialog._last_upload_dir = local_dir
+            SFTPDialog._last_download_dir = local_dir
+            self.local_path.setText(local_dir)
+
+    def _show_shortcut_menu(self, idx):
+        """右键快捷路径按钮菜单（删除/重命名）"""
+        if idx < 0 or idx >= len(self._shortcuts):
+            return
+        sc = self._shortcuts[idx]
+        menu = QMenu(self)
+        if self._config_manager:
+            menu.setStyleSheet(self._config_manager.get_menu_css())
+        act_rename = menu.addAction("重命名")
+        act_delete = menu.addAction("删除")
+        action = menu.exec(QCursor.pos())
+        if action is act_delete:
+            del self._shortcuts[idx]
+            self._save_shortcuts()
+            self._render_shortcuts()
+        elif action is act_rename:
+            self._edit_shortcut_dialog(idx)
+
+    def _add_shortcut_dialog(self):
+        """新增快捷路径弹窗：类型 + 名称 + 路径"""
+        dialog = _ShortcutEditDialog(
+            name="", path=self.current_remote_dir, sc_type='remote',
+            config_manager=self._config_manager, parent=self)
+        if dialog.exec():
+            name, path, sc_type = dialog.get_values()
+            if not path:
+                return
+            if not name:
+                name = path
+            self._shortcuts.append({'name': name, 'path': path, 'type': sc_type})
+            self._save_shortcuts()
+            self._render_shortcuts()
+
+    def _edit_shortcut_dialog(self, idx):
+        """编辑现有快捷路径"""
+        sc = self._shortcuts[idx]
+        dialog = _ShortcutEditDialog(
+            name=sc.get('name', ''), path=sc.get('path', ''),
+            sc_type=sc.get('type', 'remote'),
+            config_manager=self._config_manager, parent=self)
+        if dialog.exec():
+            name, path, sc_type = dialog.get_values()
+            if not path:
+                return
+            if not name:
+                name = path
+            self._shortcuts[idx] = {'name': name, 'path': path, 'type': sc_type}
+            self._save_shortcuts()
+            self._render_shortcuts()
 
     def _get_color_scheme(self, parent):
         """从父组件获取颜色方案"""
@@ -3059,11 +3499,11 @@ class SFTPDialog(QDialog):
                 background-color: {primary};
                 color: #ffffff;
                 border: none;
-                padding: 4px 24px;
-                font-size: 13px;
+                padding: 2px 16px;
+                font-size: 12px;
                 font-weight: bold;
                 border-radius: 4px;
-                min-height: 24px;
+                min-height: 20px;
             }}
             QPushButton:hover {{
                 background-color: {primary_hover};
@@ -3074,22 +3514,21 @@ class SFTPDialog(QDialog):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 6, 10, 6)  # 上下边距减少
+        layout.setSpacing(6)  # 紧凑布局间距（原8→6）
 
-        # 连接状态
+        # 连接状态（创建后暂不添加到布局，最终移至最下方）
         text_danger = self._get_style('text-danger', '#ff6b6b')
         self.status_label = QLabel("SFTP状态: 未连接")
-        self.status_label.setStyleSheet(f"color: {text_danger}; font-weight: bold; font-size: 13px;")
+        self.status_label.setStyleSheet(f"color: {text_danger}; font-weight: bold; font-size: 12px;")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.status_label)
 
         # 远程路径
         remote_layout = QHBoxLayout()
-        remote_layout.setSpacing(8)
+        remote_layout.setSpacing(6)  # 紧凑间距
         remote_label = QLabel("远程路径:")
         remote_label.setStyleSheet(f"color: {text_primary}; font-weight: 500;")
-        remote_label.setFixedWidth(80)
+        remote_label.setFixedWidth(72)  # 略微收窄标签
         remote_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         remote_layout.addWidget(remote_label)
         self.remote_path = QLineEdit()
@@ -3098,18 +3537,54 @@ class SFTPDialog(QDialog):
         remote_layout.addWidget(self.remote_path)
         layout.addLayout(remote_layout)
 
+        # 本地路径（显示上传/下载时使用的本地目录）
+        local_layout = QHBoxLayout()
+        local_layout.setSpacing(6)
+        local_label = QLabel("本地路径:")
+        local_label.setStyleSheet(f"color: {text_primary}; font-weight: 500;")
+        local_label.setFixedWidth(72)
+        local_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        local_layout.addWidget(local_label)
+        self.local_path = QLineEdit()
+        self.local_path.setText(SFTPDialog._last_upload_dir)
+        self.local_path.setReadOnly(True)
+        local_layout.addWidget(self.local_path)
+        # 浏览按钮：选择本地目录
+        self.local_browse_btn = QPushButton("浏览")
+        self.local_browse_btn.setFixedHeight(24)
+        self._style_operation_btn(self.local_browse_btn)
+        self.local_browse_btn.clicked.connect(self._browse_local_dir)
+        local_layout.addWidget(self.local_browse_btn)
+        layout.addLayout(local_layout)
+
+        # 快捷路径区域：横向排列的快捷按钮 + 末尾的"+"新增按钮
+        # 支持点击跳转、右键删除/重命名，列表持久化到 sftp_shortcuts.json
+        self.shortcuts_widget = QWidget()
+        self.shortcuts_layout = QHBoxLayout(self.shortcuts_widget)
+        self.shortcuts_layout.setContentsMargins(0, 0, 0, 0)
+        self.shortcuts_layout.setSpacing(3)  # 紧凑间距（原4→3）
+        self._render_shortcuts()
+        layout.addWidget(self.shortcuts_widget)
+
         # 文件列表
         self.file_list = QListWidget()
         self.file_list.itemDoubleClicked.connect(self.on_item_double_click)
         layout.addWidget(self.file_list, 1)
 
-        # 按钮 - 4个按钮平均分布间隔
+        # 按钮 - 4个按钮平均分布间隔，整体紧凑（降低高度/缩小padding）
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(0)
         self.upload_btn = QPushButton("上传")
         self.download_btn = QPushButton("下载")
         self.refresh_btn = QPushButton("刷新")
         close_btn = QPushButton("关闭")
+        # 紧凑尺寸：统一高度
+        for b in (self.upload_btn, self.download_btn, self.refresh_btn, close_btn):
+            b.setFixedHeight(24)
+        self._style_operation_btn(self.upload_btn)
+        self._style_operation_btn(self.download_btn)
+        self._style_operation_btn(self.refresh_btn)
+        self._style_operation_btn(close_btn)
         btn_layout.addStretch(1)
         btn_layout.addWidget(self.upload_btn)
         btn_layout.addStretch(1)
@@ -3120,6 +3595,9 @@ class SFTPDialog(QDialog):
         btn_layout.addWidget(close_btn)
         btn_layout.addStretch(1)
         layout.addLayout(btn_layout)
+
+        # 连接状态栏（最下方）
+        layout.addWidget(self.status_label)
 
         self.upload_btn.clicked.connect(self.upload)
         self.download_btn.clicked.connect(self.download)
@@ -3222,8 +3700,17 @@ class SFTPDialog(QDialog):
             self.refresh()
         elif data['type'] == 'parent':
             # 返回上级目录
+            # 基于current_remote_dir字符串计算父目录，避免依赖SFTP客户端工作目录
+            # （SFTP工作目录在初始化后被固定，未跟随导航更新，导致normalize('..')行为不一致）
             try:
-                parent = self.sftp.normalize("..")
+                cur = self.current_remote_dir.rstrip('/')
+                if not cur or cur == '':
+                    # 已在根目录，停留在根目录
+                    parent = '/'
+                else:
+                    parent = posixpath.dirname(cur)
+                    if not parent or not parent.startswith('/'):
+                        parent = '/'
                 self.current_remote_dir = parent
                 self.remote_path.setText(self.current_remote_dir)
                 self.refresh()
@@ -3417,17 +3904,198 @@ class SFTPDialog(QDialog):
             progress.close()
 
     def closeEvent(self, event):
-        """关闭时清理SFTP连接"""
+        """关闭时清理SFTP连接，并保存快捷路径"""
         if self.sftp:
             try:
                 self.sftp.close()
             except:
                 pass
+        # 保存快捷路径（即使弹窗未通过+按钮新增也可能有改动）
+        self._save_shortcuts()
         event.accept()
 
 
 # 脚本目录（与 script_manager_widget.py 一致）
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'scripts')
+
+
+class _ShortcutEditDialog(QDialog):
+    """SFTP快捷路径新增/编辑弹窗（类型 + 名称 + 路径）
+
+    支持两种类型：
+    - remote: 服务器路径（点击时修改远程目录）
+    - local: 本地路径（点击时修改本地目录）
+    """
+
+    # 倒三角箭头图片路径
+    _DOWN_ARROW_IMG = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        'assets', 'down_arrow.png'
+    ).replace('\\', '/')
+
+    def __init__(self, name="", path="", sc_type='remote', config_manager=None, parent=None):
+        super().__init__(parent)
+        self._config_manager = config_manager
+        self.setWindowTitle("编辑快捷路径" if name or path else "新增快捷路径")
+        self.setMinimumSize(420, 200)
+        self._init_ui(name, path, sc_type)
+
+    def _get_style(self, key, default=None):
+        if self._config_manager:
+            return self._config_manager.get_color(key, default)
+        return default
+
+    def _get_font_size(self, key, default='12px'):
+        if self._config_manager:
+            return self._config_manager.get_font_size(key, default)
+        return default
+
+    def _get_border_radius(self, key, default='4px'):
+        if self._config_manager:
+            return self._config_manager.get_border_radius(key, default)
+        return default
+
+    def _init_ui(self, name, path, sc_type):
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        text_primary = self._get_style('text', '#ffffff')
+        border = self._get_style('border', '#3c3c3c')
+        border_focus = self._get_style('border-focus', '#007acc')
+        font_size_normal = self._get_font_size('size-md', '12px')
+        border_radius = self._get_border_radius('sm', '4px')
+        unified_btn_css = ""
+        if self._config_manager:
+            unified_btn_css = self._config_manager.get_button_css('button')
+
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {bg_main}; }}
+            QLabel {{ color: {text_primary}; font-size: {font_size_normal}; }}
+            QLineEdit {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border};
+                border-radius: {border_radius};
+                padding: 4px 8px;
+                font-size: {font_size_normal};
+            }}
+            QLineEdit:focus {{ border: 2px solid {border_focus}; }}
+            QComboBox {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border};
+                border-radius: {border_radius};
+                padding: 4px 8px;
+                font-size: {font_size_normal};
+            }}
+            QComboBox::drop-down {{ border: none; width: 20px; }}
+            QComboBox::down-arrow {{ image: url({_ShortcutEditDialog._DOWN_ARROW_IMG}); }}
+            QPushButton {{
+                padding: 4px 16px;
+                font-size: {font_size_normal};
+                font-weight: bold;
+                border-radius: {border_radius};
+            }}
+            {unified_btn_css}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(8)
+
+        label_style = f"color: {text_primary}; font-size: {font_size_normal}; font-weight: 500;"
+
+        # 类型行：服务器路径 / 本地路径
+        type_row = QHBoxLayout()
+        type_row.setSpacing(6)
+        type_label = QLabel("类型:")
+        type_label.setStyleSheet(label_style)
+        type_label.setFixedWidth(70)
+        type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        type_row.addWidget(type_label)
+        self.type_combo = QComboBox()
+        self.type_combo.addItem("服务器路径", 'remote')
+        self.type_combo.addItem("本地路径", 'local')
+        # 设置初始类型
+        idx = 0 if sc_type == 'remote' else 1
+        self.type_combo.setCurrentIndex(idx)
+        self.type_combo.currentIndexChanged.connect(self._on_type_changed)
+        type_row.addWidget(self.type_combo)
+        layout.addLayout(type_row)
+
+        # 名称行
+        name_row = QHBoxLayout()
+        name_row.setSpacing(6)
+        name_label = QLabel("名称:")
+        name_label.setStyleSheet(label_style)
+        name_label.setFixedWidth(70)
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_row.addWidget(name_label)
+        self.name_input = QLineEdit()
+        self.name_input.setText(name)
+        self.name_input.setPlaceholderText("快捷路径名称（可留空，自动用路径）")
+        name_row.addWidget(self.name_input)
+        layout.addLayout(name_row)
+
+        # 路径行
+        path_row = QHBoxLayout()
+        path_row.setSpacing(6)
+        path_label = QLabel("路径:")
+        path_label.setStyleSheet(label_style)
+        path_label.setFixedWidth(70)
+        path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        path_row.addWidget(path_label)
+        self.path_input = QLineEdit()
+        self.path_input.setText(path)
+        self.path_input.setPlaceholderText("远程绝对路径，如 /var/log")
+        path_row.addWidget(self.path_input)
+        # 浏览按钮（仅本地路径类型时显示）
+        self.browse_btn = QPushButton("浏览")
+        self.browse_btn.clicked.connect(self._browse_path)
+        path_row.addWidget(self.browse_btn)
+        layout.addLayout(path_row)
+
+        # 初始化浏览按钮可见性
+        self._on_type_changed(self.type_combo.currentIndex())
+
+        layout.addStretch()
+
+        # 按钮区
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        btn_row.addStretch()
+        ok_btn = QPushButton("确定")
+        cancel_btn = QPushButton("取消")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _on_type_changed(self, index):
+        """类型切换时更新路径占位符和浏览按钮可见性"""
+        sc_type = self.type_combo.currentData()
+        if sc_type == 'local':
+            self.path_input.setPlaceholderText("本地目录路径，如 C:\\Users 或 /home/user")
+            self.browse_btn.setVisible(True)
+        else:
+            self.path_input.setPlaceholderText("远程绝对路径，如 /var/log")
+            self.browse_btn.setVisible(False)
+
+    def _browse_path(self):
+        """浏览选择本地目录"""
+        from PyQt6.QtWidgets import QFileDialog
+        current_path = self.path_input.text().strip()
+        if not current_path:
+            current_path = os.path.expanduser("~")
+        local_dir = QFileDialog.getExistingDirectory(self, "选择本地目录", current_path)
+        if local_dir:
+            self.path_input.setText(local_dir)
+
+    def get_values(self):
+        """获取用户输入的类型、名称和路径"""
+        return (self.name_input.text().strip(),
+                self.path_input.text().strip(),
+                self.type_combo.currentData())
 
 
 class ButtonEditDialog(QDialog):

@@ -3,10 +3,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit,
     QComboBox, QGroupBox, QMessageBox,
-    QSplitter, QSizePolicy, QPlainTextEdit
+    QSplitter, QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QFontMetrics, QTextDocument
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
 import os
 
 # 下拉框三角形箭头图片路径
@@ -14,151 +14,6 @@ _DOWN_ARROW_IMG = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     'assets', 'down_arrow.png'
 ).replace('\\', '/')
-
-
-class AutoResizeTextEdit(QPlainTextEdit):
-    """支持自动换行和自动加高的多行文本输入框
-
-    - 开启自动换行（WordWrap），内容超出宽度时自动折行显示
-    - 内容行数增加时直接扩展控件高度，无滚动条，完整显示所有内容
-    - 支持 sync_group 同步：同一组内的控件自动保持相同高度
-    - 使用 QTimer 防抖，避免快速输入时频繁计算高度
-    - 重用 QTextDocument 实例，避免重复创建开销
-    - 提供 text()/setText() 兼容方法，可直接替换 QLineEdit
-    """
-
-    height_changed = pyqtSignal()
-
-    def __init__(self, min_height=30, parent=None):
-        super().__init__(parent)
-        self._min_height = min_height
-        self._needed_height = min_height
-        self._sync_group = None
-        # 组级别同步锁，所有组成员共享同一个标志（首次同步时初始化）
-        self._group_sync_active = False
-
-        # 重用的 QTextDocument（避免每次 resize 都重新创建）
-        self._layout_doc = QTextDocument()
-        self._layout_doc.setDefaultFont(self.font())
-
-        # 防抖定时器：合并快速连续的文本变化
-        self._resize_timer = QTimer(self)
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.setInterval(30)  # 30ms 防抖
-        self._resize_timer.timeout.connect(self._do_auto_resize)
-
-        # 开启自动换行
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        # 滚动条始终隐藏，通过扩展高度来显示全部内容
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # 大小策略：水平扩展，垂直固定（由内容决定高度）
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        # 最小高度
-        self.setMinimumHeight(min_height)
-        # 去除默认边距，使外观接近 QLineEdit
-        self.setContentsMargins(0, 0, 0, 0)
-
-        # 内容变化时触发防抖 resize
-        self.textChanged.connect(self._schedule_resize)
-
-    def set_sync_group(self, widgets):
-        """设置同步组：当本控件高度变化时，组内所有控件同步为最大高度"""
-        self._sync_group = widgets
-
-    def _schedule_resize(self):
-        """防抖：延迟执行 resize，合并快速连续的文本变化"""
-        self._resize_timer.start()
-
-    def _do_auto_resize(self):
-        """实际执行高度计算（由定时器触发，避免频繁调用）"""
-        self._auto_resize()
-
-    def _auto_resize(self):
-        """根据内容实际显示高度（含自动换行）自动调整控件高度
-
-        使用重用的 QTextDocument 实例计算文本渲染高度。
-        组级别同步锁防止递归。
-        """
-        viewport_width = self.viewport().width()
-        if viewport_width <= 0:
-            self._needed_height = self._min_height
-            return
-
-        text = self.toPlainText()
-
-        # 使用重用的 QTextDocument 计算高度（避免每次都创建新对象）
-        self._layout_doc.setPlainText(text)
-        self._layout_doc.setTextWidth(viewport_width)
-        doc_height = int(self._layout_doc.size().height())
-        doc_margin = int(self._layout_doc.documentMargin())
-        total_height = doc_height + doc_margin * 2 + 2
-
-        self._needed_height = max(self._min_height, total_height)
-
-        # 只在非同步状态下设置自身高度
-        if not self._group_sync_active:
-            self.setFixedHeight(self._needed_height)
-            self.height_changed.emit()
-            # 触发组同步
-            if self._sync_group:
-                self._sync_group_heights()
-
-    def _sync_group_heights(self):
-        """同步组内所有控件高度为最大值（组级别锁防止递归）"""
-        if not self._sync_group:
-            return
-        # 组级别锁：检查所有成员的 _group_sync_active
-        if any(getattr(w, '_group_sync_active', False) for w in self._sync_group):
-            return
-        # 设置所有成员的锁
-        for w in self._sync_group:
-            w._group_sync_active = True
-        try:
-            max_h = max(w._needed_height for w in self._sync_group)
-            for w in self._sync_group:
-                if w.height() != max_h:
-                    w.setFixedHeight(max_h)
-        finally:
-            for w in self._sync_group:
-                w._group_sync_active = False
-
-    def text(self):
-        """兼容 QLineEdit.text()"""
-        return self.toPlainText()
-
-    def setText(self, text):
-        """兼容 QLineEdit.setText()，即使信号被阻塞也会调整高度"""
-        self.setPlainText(text)
-        # 立即计算高度（不等防抖定时器），但不触发同步（由调用方统一处理）
-        self._calc_height_only()
-        self._sync_group_heights()
-
-    def clear(self):
-        """兼容 QLineEdit.clear()，清空后重置高度"""
-        super().clear()
-        self._calc_height_only()
-        self._sync_group_heights()
-
-    def _calc_height_only(self):
-        """仅计算所需高度，不设置控件高度也不触发同步（供 setText/clear 内部使用）"""
-        viewport_width = self.viewport().width()
-        if viewport_width <= 0:
-            self._needed_height = self._min_height
-            return
-        text = self.toPlainText()
-        self._layout_doc.setPlainText(text)
-        self._layout_doc.setTextWidth(viewport_width)
-        doc_height = int(self._layout_doc.size().height())
-        doc_margin = int(self._layout_doc.documentMargin())
-        self._needed_height = max(self._min_height, doc_height + doc_margin * 2 + 2)
-
-    def resizeEvent(self, event):
-        """控件宽度变化时重新计算高度"""
-        super().resizeEvent(event)
-        # 宽度变化时延迟重算（避免 resize 循环）
-        if not self._group_sync_active:
-            self._resize_timer.start()
 
 
 class CalcToolPlugin:
@@ -442,7 +297,7 @@ class CalcToolWidget(QWidget):
 
         if read_only:
             return f"""
-                QLineEdit, QPlainTextEdit {{
+                QLineEdit {{
                     background-color: {bg_main};
                     color: {text_success};
                     border: 1px solid {border_light};
@@ -454,7 +309,7 @@ class CalcToolWidget(QWidget):
             """
 
         return f"""
-            QLineEdit, QPlainTextEdit {{
+            QLineEdit {{
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
@@ -462,7 +317,7 @@ class CalcToolWidget(QWidget):
                 border-radius: {border_radius};
                 font-size: {font_size};
             }}
-            QLineEdit:focus, QPlainTextEdit:focus {{
+            QLineEdit:focus {{
                 border-color: {border_focus};
                 background-color: {bg_input_focus};
             }}
@@ -1206,8 +1061,9 @@ class CalcToolWidget(QWidget):
         dec_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         dec_label.setFixedWidth(96)
         dec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.dec_input = AutoResizeTextEdit(min_height=input_min_height)
+        self.dec_input = QLineEdit()
         self.dec_input.setPlaceholderText("输入十进制数值...")
+        self.dec_input.setMinimumHeight(input_min_height)
         self.dec_input.setStyleSheet(self._get_line_edit_style())
         self.dec_input.textChanged.connect(self.on_dec_input_changed)
         result_layout.addRow(dec_label, self.dec_input)
@@ -1216,8 +1072,9 @@ class CalcToolWidget(QWidget):
         bin_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         bin_label.setFixedWidth(96)
         bin_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bin_input = AutoResizeTextEdit(min_height=input_min_height)
+        self.bin_input = QLineEdit()
         self.bin_input.setPlaceholderText("输入二进制 (如: 0b1010)")
+        self.bin_input.setMinimumHeight(input_min_height)
         self.bin_input.setStyleSheet(self._get_line_edit_style())
         self.bin_input.textChanged.connect(self.on_bin_input_changed)
         result_layout.addRow(bin_label, self.bin_input)
@@ -1226,16 +1083,12 @@ class CalcToolWidget(QWidget):
         hex_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
         hex_label.setFixedWidth(96)
         hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hex_input = AutoResizeTextEdit(min_height=input_min_height)
+        self.hex_input = QLineEdit()
         self.hex_input.setPlaceholderText("输入十六进制 (如: 0xFF)")
+        self.hex_input.setMinimumHeight(input_min_height)
         self.hex_input.setStyleSheet(self._get_line_edit_style())
         self.hex_input.textChanged.connect(self.on_hex_input_changed)
         result_layout.addRow(hex_label, self.hex_input)
-
-        # 设置同步组：dec/bin/hex 三个输入框保持相同高度
-        number_convert_group = [self.dec_input, self.bin_input, self.hex_input]
-        for w in number_convert_group:
-            w.set_sync_group(number_convert_group)
 
         layout.addLayout(result_layout)
         return group
@@ -1259,8 +1112,9 @@ class CalcToolWidget(QWidget):
         hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hex_row.addWidget(hex_label)
 
-        self.hex_array_input = AutoResizeTextEdit(min_height=input_min_height)
+        self.hex_array_input = QLineEdit()
         self.hex_array_input.setPlaceholderText("如: 0x48 0x65 0x6C 0x6C 0x6F")
+        self.hex_array_input.setMinimumHeight(input_min_height)
         self.hex_array_input.setStyleSheet(self._get_line_edit_style())
         self.hex_array_input.textChanged.connect(self.on_hex_array_input_changed)
         hex_row.addWidget(self.hex_array_input)
@@ -1274,17 +1128,13 @@ class CalcToolWidget(QWidget):
         str_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         str_row.addWidget(str_label)
 
-        self.string_input = AutoResizeTextEdit(min_height=input_min_height)
+        self.string_input = QLineEdit()
         self.string_input.setPlaceholderText("输入字符串...")
+        self.string_input.setMinimumHeight(input_min_height)
         self.string_input.setStyleSheet(self._get_line_edit_style())
         self.string_input.textChanged.connect(self.on_string_input_changed)
         str_row.addWidget(self.string_input)
         layout.addLayout(str_row)
-
-        # 设置同步组：hex_array/string 两个输入框保持相同高度
-        hex_string_group = [self.hex_array_input, self.string_input]
-        for w in hex_string_group:
-            w.set_sync_group(hex_string_group)
 
         return group
 
