@@ -473,6 +473,8 @@ class MainWindow(QMainWindow):
             {"bg": "#3d2b1f", "border": "#d97706"},  # 脚本管理 - 橙色
             {"bg": "#2d3a4a", "border": "#569cd6"},  # 计算工具 - 浅蓝
             {"bg": "#3d1f2b", "border": "#f44747"},  # 远程命令 - 红色
+            {"bg": "#1a3d2e", "border": "#4ec9b0"},  # 协议测试 - 青绿
+            {"bg": "#3d2b4a", "border": "#a06bff"},  # 调测工具 - 紫色
         ]
 
         # 为每个插件创建标签页
@@ -484,6 +486,14 @@ class MainWindow(QMainWindow):
             display_name = plugin_config.get("display_name", plugin_name) if plugin_config else plugin_name
             
             if plugin_name in self.plugin_manager.plugins:
+                # 调测工具默认不显示 tab，通过菜单使能
+                if plugin_name == 'DebugTool':
+                    # 只创建 widget 但不添加到 tab
+                    plugin = self.plugin_manager.plugins[plugin_name]
+                    widget = plugin.get_widget()
+                    self.plugin_widgets[plugin_name] = widget
+                    continue
+
                 # 创建插件widget
                 plugin = self.plugin_manager.plugins[plugin_name]
                 widget = plugin.get_widget()

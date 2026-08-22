@@ -35,6 +35,12 @@
             "display_name": "协议测试",
             "module": "plugins.protocol_tool",
             "main_class": "ProtocolToolPlugin"
+        },
+        {
+            "name": "DebugTool",
+            "display_name": "调测工具",
+            "module": "plugins.debug_tool",
+            "main_class": "DebugToolPlugin"
         }
     ],
     "settings": {

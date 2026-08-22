@@ -840,6 +840,7 @@ class ProtocolToolWidget(QWidget):
 
         self.recv_hex_chk = QCheckBox("Hex显示")
         self.recv_hex_chk.setStyleSheet(self._get_checkbox_style())
+        self.recv_hex_chk.setChecked(True)  # 默认 Hex 显示
         self.recv_hex_chk.toggled.connect(self._update_status)
         layout.addWidget(self.recv_hex_chk)
 
@@ -868,6 +869,7 @@ class ProtocolToolWidget(QWidget):
         self.send_hex_chk = QCheckBox("Hex发送")
         self.send_hex_chk.setStyleSheet(self._get_checkbox_style())
         self.send_hex_chk.toggled.connect(self._on_send_hex_toggled)
+        self.send_hex_chk.setChecked(True)  # 默认 Hex 发送（在 connect 之后，触发初始化）
         layout.addWidget(self.send_hex_chk)
 
         layout.addWidget(self._make_label("CRC:"))
@@ -1259,6 +1261,11 @@ class ProtocolToolWidget(QWidget):
             return
         if self._connection.send_cmd(data):
             self._tx_bytes = self._connection.get_tx_bytes()
+            # 在接收区显示 SEND 日志（与寄存器操作发送格式一致）
+            formatted = self._format_send(data)
+            self.recv_text.moveCursor(QTextCursor.MoveOperation.End)
+            self.recv_text.insertPlainText(formatted)
+            self.recv_text.ensureCursorVisible()
             self._update_status()
 
     def _on_add_crc(self):

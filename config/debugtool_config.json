@@ -1,0 +1,9 @@
+{
+    "name": "DebugTool",
+    "display_name": "调测工具",
+    "settings": {
+        "max_display_lines": 2000,
+        "auto_refresh_interval_ms": 200,
+        "log_level": "DEBUG"
+    }
+}

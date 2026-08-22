@@ -5,15 +5,17 @@ from PyQt6.QtGui import QColor, QTextCharFormat, QFont
 class ANSIParser:
     """ANSI转义序列解析器，用于处理终端颜色和格式"""
 
-    # ANSI转义序列正则表达式（预编译）- 支持更多类型
-    # CSI序列: \x1b[... 后跟各种控制字符
-    # OSC序列: \x1b]...
-    # 其他序列: \x1b 后跟其他字符
+    # ANSI转义序列正则表达式（预编译）- 按 ECMA-48 字节范围匹配
+    # CSI: ESC [ 参数字节(0x30-0x3F)* 中间字节(0x20-0x2F)* 终止字节(0x40-0x7E)
+    #   覆盖 SGR 颜色(m)、光标移动(A/B/C/D/H/f/G)、行编辑(K/J/@/P/X)、
+    #   私有模式(?2004h/?2004l)、波浪键序列(200~/201~) 等
+    # OSC: ESC ] ... BEL(0x07) 或 ST(ESC \)
+    # Fe:  ESC + 单字符(7/8/=/> 等)、字符集选择 ESC ( B 等
     ANSI_PATTERN = re.compile(
-        r'\x1B\[[0-9;]*[a-zA-Z@!A-Za-z]|'  # CSI 序列 (包括各种控制字符)
-        r'\x1B\][^\x07\x1b]*(?:\x07|\x1B\\)|'  # OSC 序列
-        r'\x1B[><=]*[a-zA-Z]|'  # 其他转义序列
-        r'\x1B[()][AB012]'  # 字符集选择序列
+        r'\x1B\[[\x20-\x3f]*[\x40-\x7e]|'        # CSI 序列
+        r'\x1B\][^\x07]*(?:\x07|\x1B\\)|'        # OSC 序列（BEL 或 ST 结尾）
+        r'\x1B[()#][0-9A-Za-z]|'                 # 字符集/制表符选择
+        r'\x1B[0-9A-Za-z=<>]'                    # 其他 Fe 单字符序列
     )
 
     # ANSI颜色代码映射（使用缓存）
@@ -137,11 +139,19 @@ class ANSIParser:
         return self.ANSI_PATTERN.sub('', text)
 
     def parse(self, text):
-        """解析包含ANSI转义序列的文本，返回(纯文本, 格式列表)"""
+        """解析包含ANSI转义序列的文本，返回(文本片段, 格式)列表
+
+        关键设计：
+        - SGR 颜色序列(\\x1b[...m)：由解析器消费并更新 current_format，不出现在片段中；
+        - OSC 序列（窗口标题等）：消费，不可见；
+        - 光标移动/行编辑类序列（A/B/C/D/H/f/G/K/J/@/P/X、私有模式 ?2004h 等）：
+          原样放入文本片段透传给渲染层，由终端控件按终端语义执行光标操作，
+          否则会出现"光标不动、行内编辑错乱、清行失效"等问题。
+        """
         # 快速检查是否包含ANSI序列
         if '\x1b' not in text:
             return [(text, QTextCharFormat(self.current_format))]
-        
+
         parts = []
         last_end = 0
 
@@ -153,7 +163,12 @@ class ANSIParser:
 
             # 解析ANSI序列
             ansi_code = match.group()
-            self.apply_ansi_code(ansi_code)
+            if ansi_code.startswith('\x1b]') or self._is_format_sequence(ansi_code):
+                # OSC（窗口标题等，不可见）和 SGR 颜色序列：消费，不放入片段
+                self.apply_ansi_code(ansi_code)
+            else:
+                # 光标移动/行编辑/私有模式等：透传给渲染层执行
+                parts.append((ansi_code, QTextCharFormat(self.current_format)))
             last_end = match.end()
 
         # 添加剩余的纯文本
@@ -162,6 +177,17 @@ class ANSIParser:
             parts.append((plain_text, QTextCharFormat(self.current_format)))
 
         return parts
+
+    @staticmethod
+    def _is_format_sequence(ansi_code):
+        """判断序列是否为 SGR 颜色/格式序列（\\x1b[...m），需要解析器消费"""
+        if ansi_code.startswith('\x1b]'):
+            return False  # OSC 由解析器消费，但不是格式序列
+        if ansi_code.startswith('\x1b['):
+            # SGR: ESC [ 参数... m，私有模式(?)开头的不是颜色序列
+            body = ansi_code[2:-1]
+            return ansi_code.endswith('m') and '?' not in body
+        return False
 
     def apply_ansi_code(self, ansi_code):
         """应用ANSI转义序列到当前格式"""
@@ -193,7 +219,9 @@ class ANSIParser:
                 return
             
             # 处理颜色和格式命令
+            # 空参数 SGR（\x1b[m）等价于 \x1b[0m：重置所有属性
             if not code_str:
+                self.reset_format()
                 return
 
             codes = [int(c) for c in code_str.split(';') if c.isdigit()]

@@ -213,6 +213,26 @@ class TerminalEdit(QTextEdit):
 
         menu.exec(event.globalPos())
 
+    def mousePressEvent(self, event):
+        """记录点击前的光标位置（供 mouseRelease 恢复）"""
+        self._cursor_pos_before_mouse = self.textCursor().position()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """鼠标释放后：纯点击（非拖选）恢复光标位置
+
+        终端光标位置由远程 shell 通过 ANSI 序列控制，
+        鼠标点击不应改变它，否则会导致后续行内编辑回显插入错位。
+        拖选（复制场景）保留选区，渲染层会自行跳过选区光标。
+        """
+        super().mouseReleaseEvent(event)
+        if not self.textCursor().hasSelection():
+            pos = getattr(self, '_cursor_pos_before_mouse', None)
+            if pos is not None:
+                cur = self.textCursor()
+                cur.setPosition(min(pos, self.document().characterCount() - 1))
+                self.setTextCursor(cur)
+
     def keyPressEvent(self, event):
         """拦截所有键盘事件并发送给父组件处理"""
         self.key_pressed.emit(event)
@@ -337,9 +357,8 @@ class SessionTab(QWidget):
         self.current_input = ""
         self.interactive_mode = False
         self._tab_pending = False  # Tab补全等待标志：下次输出时从display提取补全结果
-        # 本地回显消重队列：交互模式下，为消除"输入不及时显示"，用户按键时先本地write_output回显；
-        # 等服务器回显到来时，从回显文本头部吸收掉与本地echo相同的部分，防止双显。
-        self._local_echo_sent = ""
+        self._bracketed_paste_enabled = False  # 远端shell是否启用bracketed paste（收到 \x1b[?2004h 时置位）
+        self._saved_cursor_pos = None  # DECSC/DECRC (\x1b7/\x1b[s 保存的光标位置)
         # 使用主题文字颜色作为ANSI解析器默认前景色
         text_hex = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#cccccc'))
         # 根据背景色亮度判断主题模式，决定ANSI颜色映射
@@ -637,8 +656,24 @@ class SessionTab(QWidget):
         if not text:
             return
 
+        # 光标起点策略（终端光标位置同步的关键）：
+        # - 系统提示文本（color 参数，如连接提示、错误信息）：始终追加到文档末尾；
+        # - 服务器回显：光标在最后一个文本块（当前输入行）时保持原位，使上一次
+        #   渲染中通过 \x1b[D/\x1b[C 等序列移动到行中的光标得以延续，readline 的
+        #   增量行编辑（\x1b[@ 插入、\x1b[P 删除）才能作用在正确位置；
+        # - 光标不在最后一行（如用户点击了历史区）时：跳到文档末尾追加，
+        #   避免把输出插入到历史文本中间。
         cursor = self.terminal_display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if color is not None:
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+        elif cursor.hasSelection():
+            # 用户正在拖选复制：光标选区不可用于渲染定位，追加到文档末尾，
+            # 避免 insertText 替换掉用户选中的文本
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+        else:
+            doc = cursor.document()
+            if doc.lastBlock().blockNumber() != cursor.block().blockNumber():
+                cursor.movePosition(QTextCursor.MoveOperation.End)
 
         # 先处理回车符 \r\n -> \n, 然后处理单独的 \r
         text = text.replace('\r\n', '\n')
@@ -670,30 +705,36 @@ class SessionTab(QWidget):
 
         # 更新current_input：仅在Tab补全等待状态下从显示内容提取
         # 交互模式下current_input由本地按键追踪维护，减少对display解析的依赖
+        # 注意：只有成功从最后一行识别到提示符时才清除等待标志，
+        # 否则保持标志，等待后续分块重绘完成后再解析（避免半行状态误判）
         if getattr(self, '_tab_pending', False):
-            self._update_current_input_from_display()
-            self._tab_pending = False
+            if self._update_current_input_from_display():
+                self._tab_pending = False
 
     def _update_current_input_from_display(self):
-        """从显示内容中更新current_input（处理Tab补全等场景）
+        """从显示内容中更新current_input（处理Tab补全、历史回填、多行粘贴等场景）
 
         策略：**只在最后一行能明确识别到提示符时才更新**，
-        任何识别失败的情况都直接返回，绝不修改 current_input，
+        识别失败返回 False 且绝不修改 current_input，
         避免"把服务器输出当作用户输入"或"错误清空current_input"导致的删除异常。
+
+        Returns:
+            bool: 是否成功识别提示符并更新
         """
         import re
         plain_text = self.terminal_display.toPlainText()
         lines = plain_text.split('\n')
         if not lines:
-            return
+            return False
 
-        last_line = lines[-1]
+        # 去除可能残留的 C0 控制字符（如 BEL），避免污染提示符识别和输入追踪
+        last_line = re.sub(r'[\x00-\x1f\x7f]', '', lines[-1])
 
         # 查找提示符位置（常见提示符：# $ > %）
         prompt_patterns = [
-            r'^\s*[\w@.-]+[\s]*:[\s]*[\w/~.@-]*\s*[#$>%]\s*',  # user@host:path$ 形式
-            r'^\s*[A-Za-z0-9_.\-]+[#$>%]\s+',                    # 简化提示符 xxx$ 
-            r'^\s*[#$>%]\s+',                                      # 最简 $ 
+            r'^\s*[\w@.\-\[\]]+[\s:]*[\w/~.@\-\[\]]*[#$>%]\s*',  # user@host:path$ / [user@host dir]$ 形式
+            r'^\s*[A-Za-z0-9_.\-]+[#$>%]\s+',                    # 简化提示符 xxx$
+            r'^\s*[#$>%]\s+',                                     # 最简 $
         ]
 
         for pattern in prompt_patterns:
@@ -703,13 +744,10 @@ class SessionTab(QWidget):
                 # 检测到提示符说明命令已结束，重置ANSI颜色格式，避免颜色跨命令残留
                 if self.ansi_parser.enable_color:
                     self.ansi_parser.reset_format()
-                return
+                return True
 
-        # ============================================================
-        # 未找到提示符 → 保守策略：直接 return，保持原来的 current_input 不变
-        # 不做"往前5行回溯查找 + 强制赋值last_line"这类高风险操作
-        # ============================================================
-        return
+        # 未找到提示符 → 保守策略：保持原来的 current_input 不变
+        return False
 
     def _should_scroll(self):
         """判断是否需要滚动到可见区域"""
@@ -723,147 +761,265 @@ class SessionTab(QWidget):
         # 每5次输出才滚动一次
         return self._scroll_counter % 5 == 0
 
+    # 无显示效果、直接忽略的 C0 控制字符：
+    # BEL(0x07 响铃)、SO/SI(0x0e/0x0f 字符集切换) —— 绝不能插入文档，
+    # 否则会形成不可见残留字符，导致退格/删除错位（Tab无补全后命令残留的根因）
+    _IGNORE_CHARS = '\x07\x0e\x0f'
+
+    def _terminal_write_char(self, cursor, ch):
+        """按终端语义写入一个可见字符：光标处已有字符则覆盖，行尾则追加
+
+        终端单元格是定长的，可打印字符总是"覆盖"光标处单元格并右移；
+        QTextEdit 默认 insertText 是"插入"模式（尾部右移），在光标位于行中
+        （如 readline 行内编辑回显）时会把文本写错位置，故行中需逐字覆盖。
+        """
+        block = cursor.block()
+        block_end = block.position() + block.length() - 1  # 块内最后一个可见字符之后的位置
+        if cursor.position() < block_end:
+            # 光标右侧还有字符：选中右侧一个字符并替换（终端覆盖语义）
+            cursor.movePosition(QTextCursor.MoveOperation.Right,
+                                QTextCursor.MoveMode.KeepAnchor, 1)
+            cursor.insertText(ch)
+        else:
+            cursor.insertText(ch)
+
     def _insert_text_with_cr(self, cursor, text):
-        """插入文本，处理 \r 回车符、\b 退格符、\t 制表符等控制字符"""
-        if '\r' not in text and '\b' not in text and '\x7f' not in text and '\t' not in text and '\x1b' not in text:
-            cursor.insertText(text)
+        """插入文本，按终端语义处理控制字符
+
+        - \\r (CR)：回到行首并清空当前行内容（readline 重绘输入行的标准动作）
+        - \\b (BS)：光标左移一格，不删除内容（删除由随后的"空格覆盖"或
+          \\x1b[P 等序列表达）；不能跨出当前文本块
+        - \\x07 (BEL) / \\x0e / \\x0f：无显示效果，忽略
+        - \\t：制表符按4空格展开
+        - \\x1b...：ANSI 光标/编辑序列，交由 _apply_cursor_sequence 执行
+        - 可打印字符：行尾批量追加（快速路径），行中逐字覆盖
+        """
+        control_chars = '\r\b\x7f\t\x1b' + self._IGNORE_CHARS
+        if not any(c in text for c in control_chars):
+            # 纯文本快速路径：文档末尾直接批量追加；行中逐字覆盖
+            if cursor.atEnd():
+                cursor.insertText(text)
+            else:
+                for ch in text:
+                    self._terminal_write_char(cursor, ch)
             return
-        
+
         i = 0
-        while i < len(text):
-            if text[i] == '\r':
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == '\r':
+                # 回到行首并清空整行（readline 重绘：先 CR 再重印提示符+输入行）
                 cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
                 cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
                 cursor.removeSelectedText()
                 i += 1
-            elif text[i] == '\b':
-                if i + 2 < len(text) and text[i+1] == ' ' and text[i+2] == '\b':
-                    if cursor.position() > 0:
-                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                    i += 3
-                elif i + 1 < len(text) and text[i+1] == '\b':
-                    if cursor.position() > 0:
-                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                    if cursor.position() > 0:
-                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                    i += 2
-                else:
-                    if cursor.position() > 0:
-                        cursor.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                    i += 1
-            elif text[i] == '\x7f':
-                # DEL：删除光标右侧字符；只要还没到文档真正末尾（characterCount包含末尾不可见段落标记）
-                # 就允许删除（避免原条件 position < count-1 把"倒数第一个可见字符前"的删除也拦截掉）
-                total = cursor.document().characterCount()
-                if cursor.position() < total - 1:  # 右侧至少还有一个真正可见的字符
-                    cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
+            elif ch == '\b':
+                # BS：仅左移光标（不允许退到上一个文本块）
+                if cursor.position() > cursor.block().position():
+                    cursor.movePosition(QTextCursor.MoveOperation.Left,
+                                        QTextCursor.MoveMode.MoveAnchor, 1)
+                i += 1
+            elif ch in self._IGNORE_CHARS:
+                # BEL/SO/SI：无显示效果，跳过
+                i += 1
+            elif ch == '\x7f':
+                # DEL（输出流中罕见）：删除光标右侧字符
+                if not cursor.atEnd():
+                    cursor.movePosition(QTextCursor.MoveOperation.Right,
+                                        QTextCursor.MoveMode.KeepAnchor, 1)
                     cursor.removeSelectedText()
                 i += 1
-            elif text[i] == '\t':
-                cursor.insertText("    ")
+            elif ch == '\t':
+                if cursor.atEnd():
+                    cursor.insertText("    ")
+                else:
+                    for _ in range(4):
+                        self._terminal_write_char(cursor, ' ')
                 i += 1
-            elif text[i] == '\x1b':
-                seq_end = i + 1
-                if seq_end < len(text) and text[seq_end] == '[':
-                    seq_end += 1
-                    while seq_end < len(text) and (text[seq_end].isdigit() or text[seq_end] == ';'):
-                        seq_end += 1
-                    if seq_end < len(text) and text[seq_end].isalpha():
-                        seq_end += 1
-                elif seq_end < len(text) and text[seq_end].isalpha():
-                    seq_end += 1
-                
+            elif ch == '\x1b':
+                seq_end = self._scan_escape_seq(text, i)
                 if seq_end > i:
-                    ansi_seq = text[i:seq_end]
-                    self._apply_cursor_sequence(cursor, ansi_seq)
-                i = seq_end
+                    self._apply_cursor_sequence(cursor, text[i:seq_end])
+                    i = seq_end
+                else:
+                    i += 1  # 单独 ESC，忽略
             else:
-                next_control = len(text)
-                for j in range(i, len(text)):
-                    if text[j] in '\r\b\x7f\t\x1b':
-                        next_control = j
-                        break
-                if next_control > i:
-                    cursor.insertText(text[i:next_control])
-                i = next_control
+                # 连续可打印字符片段
+                j = i
+                while j < n and text[j] not in control_chars:
+                    j += 1
+                run = text[i:j]
+                if run:
+                    if cursor.atEnd():
+                        cursor.insertText(run)  # 文档末尾：批量追加（快速路径）
+                    else:
+                        for rc in run:
+                            self._terminal_write_char(cursor, rc)
+                i = j
+
+    @staticmethod
+    def _scan_escape_seq(text, i):
+        """扫描从 i 处 ESC 开始的转义序列，返回序列结束下标（不完整返回 i）"""
+        n = len(text)
+        if i + 1 >= n:
+            return i  # 只有单独 ESC
+        c1 = text[i + 1]
+        if c1 == '[':
+            # CSI: ESC [ 参数(0x30-0x3F)* 中间(0x20-0x2F)* 终止(0x40-0x7E)
+            j = i + 2
+            while j < n and '\x20' <= text[j] <= '\x3f':
+                j += 1
+            if j < n and '\x40' <= text[j] <= '\x7e':
+                return j + 1
+            return i  # 不完整，等待更多数据
+        if c1 == ']':
+            # OSC: ESC ] ... BEL(0x07) 或 ST(ESC \)
+            j = i + 2
+            while j < n:
+                if text[j] == '\x07':
+                    return j + 1
+                if text[j] == '\x1b' and j + 1 < n and text[j + 1] == '\\':
+                    return j + 2
+                j += 1
+            return i  # 不完整
+        if c1 == 'O':
+            # SS3: ESC O + 单字符（应用模式方向键等）
+            if i + 2 < n:
+                return i + 3
+            return i
+        # 其他 Fe 序列: ESC + 单字符
+        return i + 2
     
     def _apply_cursor_sequence(self, cursor, seq):
-        """应用ANSI光标移动序列"""
+        """应用 ANSI 光标/行编辑序列（readline 行编辑回显的核心）
+
+        覆盖 readline 常用序列：
+        - 光标移动：A/B/C/D（上下左右）、E/F（下/上+行首）、G/H/f（定位列）
+        - 行编辑：K（清行）、J（清屏）、@（插入字符位）、P（删除字符）、X（擦除字符）
+        - 光标保存/恢复：s/u、ESC 7/8
+        - 私有模式：?2004h/?2004l（bracketed paste 协商）
+        - 其余（h/l/r/L/M/S/T/q/~ 等）：无显示效果，忽略
+        """
         if not seq or seq[0] != '\x1b':
             return
-        
-        if seq.startswith('\x1b['):
-            # CSI序列
-            if len(seq) >= 3:
-                params_part = seq[2:-1]
-                end_char = seq[-1]
-                
-                # 解析参数
-                params = []
-                if params_part:
-                    params = [int(p) for p in params_part.split(';') if p.isdigit()]
-                
-                # 光标移动命令
-                if end_char == 'A':
-                    # 上移
-                    count = params[0] if params else 1
-                    for _ in range(count):
-                        cursor.movePosition(QTextCursor.MoveOperation.Up)
-                elif end_char == 'B':
-                    # 下移
-                    count = params[0] if params else 1
-                    for _ in range(count):
-                        cursor.movePosition(QTextCursor.MoveOperation.Down)
-                elif end_char == 'C':
-                    # 右移
-                    count = params[0] if params else 1
-                    for _ in range(count):
-                        cursor.movePosition(QTextCursor.MoveOperation.Right)
-                elif end_char == 'D':
-                    # 左移
-                    count = params[0] if params else 1
-                    for _ in range(count):
-                        cursor.movePosition(QTextCursor.MoveOperation.Left)
-                elif end_char in ('H', 'f'):
-                    # 移动到指定位置
-                    if len(params) >= 2:
-                        row, col = params[0], params[1]
-                        cursor.movePosition(QTextCursor.MoveOperation.Start)
-                        for _ in range(row - 1):
-                            cursor.movePosition(QTextCursor.MoveOperation.Down)
-                        for _ in range(col - 1):
-                            cursor.movePosition(QTextCursor.MoveOperation.Right)
-                    else:
-                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-                elif end_char == 'J':
-                    # 清屏
-                    if params and params[0] == 2:
-                        cursor.select(QTextCursor.SelectionType.Document)
-                        cursor.removeSelectedText()
-                    elif params and params[0] == 1:
-                        cursor.movePosition(QTextCursor.MoveOperation.Start)
-                        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                    else:
-                        cursor.movePosition(QTextCursor.MoveOperation.End)
-                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                elif end_char == 'K':
-                    # 清除行
-                    if params and params[0] == 2:
-                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-                        cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                    elif params and params[0] == 1:
-                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
-                    else:
-                        cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
-                        cursor.removeSelectedText()
+
+        MOVE = QTextCursor.MoveOperation
+        MODE = QTextCursor.MoveMode
+
+        # === Fe 单字符序列：ESC 7 保存光标 / ESC 8 恢复光标 ===
+        if len(seq) == 2 and seq[1] == '7':
+            self._saved_cursor_pos = cursor.position()
+            return
+        if len(seq) == 2 and seq[1] == '8':
+            if self._saved_cursor_pos is not None:
+                pos = max(0, min(self._saved_cursor_pos, cursor.document().characterCount() - 1))
+                cursor.setPosition(pos)
+            return
+
+        # === SS3 应用模式序列：ESC O A/B/C/D/F/H ===
+        if seq.startswith('\x1bO') and len(seq) == 3:
+            c = seq[2]
+            if c == 'A':
+                cursor.movePosition(MOVE.Up)
+            elif c == 'B':
+                cursor.movePosition(MOVE.Down)
+            elif c == 'C':
+                cursor.movePosition(MOVE.Right)
+            elif c == 'D':
+                if cursor.position() > cursor.block().position():
+                    cursor.movePosition(MOVE.Left)
+            elif c in ('F', 'H'):
+                cursor.movePosition(MOVE.StartOfLine)
+            return
+
+        if not seq.startswith('\x1b['):
+            return  # OSC 等不可见序列，忽略
+
+        body = seq[2:-1]
+        end_char = seq[-1]
+        private = body[:1] in '?<>=!'
+        param_str = body[1:] if private else body
+        params = [int(p) for p in param_str.split(';') if p.isdigit()]
+        count = params[0] if params else 1
+
+        if end_char == 'A':
+            cursor.movePosition(MOVE.Up, MODE.MoveAnchor, count)
+        elif end_char == 'B':
+            cursor.movePosition(MOVE.Down, MODE.MoveAnchor, count)
+        elif end_char == 'C':
+            cursor.movePosition(MOVE.Right, MODE.MoveAnchor, count)
+        elif end_char == 'D':
+            # 左移不允许跨出当前文本块（终端中光标不会越过行首）
+            block_start = cursor.block().position()
+            for _ in range(count):
+                if cursor.position() > block_start:
+                    cursor.movePosition(MOVE.Left)
+        elif end_char == 'E':
+            cursor.movePosition(MOVE.Down, MODE.MoveAnchor, count)
+            cursor.movePosition(MOVE.StartOfLine)
+        elif end_char == 'F':
+            cursor.movePosition(MOVE.Up, MODE.MoveAnchor, count)
+            cursor.movePosition(MOVE.StartOfLine)
+        elif end_char in ('G', 'H', 'f', 'd'):
+            # 绝对定位：readline 只在当前输入行上定位列（行号忽略）
+            col = params[-1] if params else 1
+            cursor.movePosition(MOVE.StartOfLine)
+            if col > 1:
+                cursor.movePosition(MOVE.Right, MODE.MoveAnchor, col - 1)
+        elif end_char == 'J':
+            # 清屏：0=光标到文末, 1=文首到光标, 2/3=全屏
+            mode = params[0] if params else 0
+            if mode == 2 or mode == 3:
+                cursor.select(QTextCursor.SelectionType.Document)
+                cursor.removeSelectedText()
+            elif mode == 1:
+                cursor.movePosition(MOVE.Start, MODE.KeepAnchor)
+                cursor.removeSelectedText()
+            else:
+                cursor.movePosition(MOVE.End, MODE.KeepAnchor)
+                cursor.removeSelectedText()
+        elif end_char == 'K':
+            # 清行：0=光标到行尾, 1=行首到光标, 2=整行
+            mode = params[0] if params else 0
+            if mode == 2:
+                cursor.movePosition(MOVE.StartOfLine)
+                cursor.movePosition(MOVE.EndOfLine, MODE.KeepAnchor)
+                cursor.removeSelectedText()
+            elif mode == 1:
+                cursor.movePosition(MOVE.StartOfLine, MODE.KeepAnchor)
+                cursor.removeSelectedText()
+            else:
+                cursor.movePosition(MOVE.EndOfLine, MODE.KeepAnchor)
+                cursor.removeSelectedText()
+        elif end_char == '@':
+            # ICH 插入字符位：在光标处腾出 count 个空格（后续字符覆盖填入），
+            # 光标保持在插入点不动
+            cursor.insertText(' ' * count)
+            cursor.movePosition(MOVE.Left, MODE.MoveAnchor, count)
+        elif end_char == 'P':
+            # DCH 删除字符：删除光标右侧 count 个字符，尾部左移
+            cursor.movePosition(MOVE.Right, MODE.KeepAnchor, count)
+            cursor.removeSelectedText()
+        elif end_char == 'X':
+            # ECH 擦除字符：光标右侧 count 个字符替换为空格，光标不动
+            start = cursor.position()
+            cursor.movePosition(MOVE.Right, MODE.KeepAnchor, count)
+            erased = cursor.position() - start
+            if erased > 0:
+                cursor.insertText(' ' * erased)
+                cursor.movePosition(MOVE.Left, MODE.MoveAnchor, erased)
+        elif end_char == 's':
+            self._saved_cursor_pos = cursor.position()
+        elif end_char == 'u':
+            if self._saved_cursor_pos is not None:
+                pos = max(0, min(self._saved_cursor_pos, cursor.document().characterCount() - 1))
+                cursor.setPosition(pos)
+        elif end_char in ('h', 'l') and private and 2004 in params:
+            # bracketed paste 模式协商：?2004h 开启 / ?2004l 关闭
+            self._bracketed_paste_enabled = (end_char == 'h')
+        # 其余序列（r 滚动区域、L/M 插删行、S/T 滚动、I/Z 制表、
+        # g 清制表位、q 光标样式、~ 功能键/粘贴标记、c/n 设备查询等）无显示效果，忽略
 
     def make_format(self, color):
         """创建文本格式"""
@@ -941,135 +1097,102 @@ class SessionTab(QWidget):
         s = re.sub(r'\x1b[][A-Za-z0-9^_]', '', s)             # 简单Fe序列
         return s
 
-    def _echo_suppress(self, raw_data):
-        """echo suppression（回显消重）
-
-        交互模式下用户按键时本地已即时回显，服务器回显到达时需要消重。
-        支持部分匹配：服务器可能分多次发送回显（逐字符或分块），只要
-        raw_data 的纯文本前缀与 _local_echo_sent 的前缀有公共部分就消耗它。
-
-        返回：(剩余文本, 是否消耗了echo)
-        """
-        echo = getattr(self, '_local_echo_sent', '')
-        if not echo:
-            return raw_data, False
-        stripped = self._strip_ansi(raw_data)
-        if not stripped:
-            return raw_data, False
-
-        # ---- 计算最长公共前缀 ----
-        common_len = 0
-        min_len = min(len(stripped), len(echo))
-        while common_len < min_len and stripped[common_len] == echo[common_len]:
-            common_len += 1
-
-        if common_len == 0:
-            # 无任何公共前缀 → 服务器输出了其他内容，echo 过期
-            self._local_echo_sent = ""
-            return raw_data, False
-
-        # ---- 从 raw_data 中消耗 common_len 个非 ANSI 字符 ----
-        consume_count = common_len
-        i = 0
-        seen = 0
-        n = len(raw_data)
-        while i < n and seen < consume_count:
-            c = raw_data[i]
-            if c == '\x1b':
-                if i + 1 < n and raw_data[i + 1] == '[':
-                    j = i + 2
-                    while j < n:
-                        if raw_data[j].isalpha() or raw_data[j] == '@':
-                            i = j + 1
-                            break
-                        j += 1
-                    else:
-                        i += 1
-                elif i + 1 < n and raw_data[i + 1] == ']':
-                    j = i + 2
-                    while j < n:
-                        if raw_data[j] == '\x07':
-                            i = j + 1
-                            break
-                        if raw_data[j] == '\x1b' and j + 1 < n and raw_data[j + 1] == '\\':
-                            i = j + 2
-                            break
-                        j += 1
-                    else:
-                        i += 1
-                else:
-                    i += 2
-            else:
-                seen += 1
-                i += 1
-
-        # 保留 echo 中未被消耗的尾部，供下次消重使用
-        self._local_echo_sent = echo[common_len:]
-        return raw_data[i:], True
-
     def _flush_output_buffer(self):
         """刷新输出缓冲区，处理不完整的ANSI序列
 
-        关键修复：
-        1) 删除"退格序列等待"逻辑——\b 本身是单字符完整的控制符，不需要等待，
-           否则会出现"按Backspace界面不更新，卡住一段时间"的错觉/死等。
-        2) ANSI CSI 序列完整性判断：结尾字符只需是字母 [a-zA-Z@]，
-           原正则把 CSI 结尾字母枚举不全，并且混入了毫无意义的 `|n$`，
-           导致大量合法 CSI 序列被错误判定为"不完整"，永远滞留在缓冲区。
-        3) 本地即时回显 + echo suppression：用户按键时本地立刻显示，
-           服务器回显到达时消重，既消除输入延迟感，又避免双显。
+        设计原则：交互模式下完全依赖服务器端 PTY 回显，本地不做任何回显或消重。
+        这与标准终端（xterm/gnome-terminal）行为一致，从根本上消除双显和首字母
+        重复问题。本地仅负责将服务器返回的数据按 ANSI 序列完整性刷新到显示区。
+
+        ANSI 序列类型：
+        - CSI: \\x1b[ 参数 结尾字母([a-zA-Z@])
+        - OSC: \\x1b] ... \\x07 (BEL) 或 \\x1b] ... \\x1b\\\\ (ST)
+        - SS3: \\x1bO 单个字母
+        - 其他: \\x1b + 单个字符
         """
         if not self._output_buffer:
             return
 
-        # ============================================================
-        # 1. 缓冲区末尾只有单独 ESC (\x1b) —— 等后续字符再判断序列类型
-        # ============================================================
-        if self._output_buffer.endswith('\x1b'):
-            complete_part = self._output_buffer[:-1]
-            self._output_buffer = '\x1b'
-            if complete_part:
-                complete_part, _ = self._echo_suppress(complete_part)
-                if complete_part:
-                    self.write_output(complete_part)
-            return
+        # 从左到右扫描，找到最后一个不完整序列的起点
+        i = 0
+        n = len(self._output_buffer)
+        last_complete = 0  # 最后一个完整序列的末尾位置
 
-        # ============================================================
-        # 2. 缓冲区中包含 ESC，判断最后一个转义序列是否完整
-        # ============================================================
-        last_esc = self._output_buffer.rfind('\x1b')
-        if last_esc != -1:
-            after_esc = self._output_buffer[last_esc:]
-            # 2a) CSI 序列：\x1b [ 参数 ; 参数 ... 结尾字母([a-zA-Z@])
-            if len(after_esc) >= 2 and after_esc[1] == '[':
-                # 判断是否以合法 CSI 结尾字符收尾（字母 A-Za-z 或 @）
-                if len(after_esc) < 3 or not (after_esc[-1].isalpha() or after_esc[-1] == '@'):
-                    # 序列不完整 → 输出 ESC 前的内容，把不完整序列留在缓冲区
-                    complete_part = self._output_buffer[:last_esc]
-                    self._output_buffer = after_esc
-                    if complete_part:
-                        complete_part, _ = self._echo_suppress(complete_part)
-                        if complete_part:
-                            self.write_output(complete_part)
-                    return
-            # 2b) 只有单独 ESC （尚未出现后续控制字符）
-            elif len(after_esc) == 1:
-                complete_part = self._output_buffer[:last_esc]
-                self._output_buffer = after_esc
-                if complete_part:
-                    complete_part, _ = self._echo_suppress(complete_part)
-                    if complete_part:
-                        self.write_output(complete_part)
-                return
+        while i < n:
+            if self._output_buffer[i] == '\x1b':
+                # 发现 ESC，尝试解析完整序列
+                seq_end = self._parse_ansi_seq(self._output_buffer, i)
+                if seq_end > i:
+                    # 序列完整，继续扫描
+                    i = seq_end
+                    last_complete = i
+                else:
+                    # 序列不完整，需要等待更多数据
+                    break
+            else:
+                i += 1
+                last_complete = i
 
-        # ============================================================
-        # 3. 缓冲区数据完整 → echo suppression 后全部输出
-        # ============================================================
-        complete_data = self._output_buffer
-        self._output_buffer = ""
-        complete_data, _ = self._echo_suppress(complete_data)
-        if complete_data:
-            self.write_output(complete_data)
+        if last_complete > 0:
+            # 输出所有完整的内容
+            complete_data = self._output_buffer[:last_complete]
+            self._output_buffer = self._output_buffer[last_complete:]
+            if complete_data:
+                self.write_output(complete_data)
+        # 如果 last_complete == 0，说明开头就有不完整序列，等待更多数据
+
+    def _parse_ansi_seq(self, data, start):
+        """解析从 start 位置开始的 ANSI 转义序列
+
+        Returns:
+            序列结束位置的下一个索引（序列完整时）
+            start（序列不完整时，需要等待更多数据）
+        """
+        n = len(data)
+        if start >= n:
+            return start
+
+        # 必须以 ESC 开头
+        if data[start] != '\x1b':
+            return start + 1  # 不是 ESC，跳过
+
+        if start + 1 >= n:
+            return start  # 只有单独 ESC，等待后续字符
+
+        c1 = data[start + 1]
+
+        # === CSI 序列: ESC [ 参数(0x30-0x3F)* 中间(0x20-0x2F)* 终止(0x40-0x7E) ===
+        if c1 == '[':
+            i = start + 2
+            # 跳过参数/中间字节（数字、分号、问号、空格、! " # 等）
+            while i < n and '\x20' <= data[i] <= '\x3f':
+                i += 1
+            # 期望一个终止字节（0x40-0x7E，含字母、@、~ 等）
+            if i < n and '\x40' <= data[i] <= '\x7e':
+                return i + 1  # 序列完整
+            return start  # 序列不完整，等待更多数据
+
+        # === OSC 序列: \x1b] ... \x07 (BEL) 或 \x1b] ... \x1b\\ (ST) ===
+        if c1 == ']':
+            i = start + 2
+            while i < n:
+                if data[i] == '\x07':  # BEL 结尾
+                    return i + 1
+                if data[i] == '\x1b' and i + 1 < n and data[i + 1] == '\\':  # ST 结尾
+                    return i + 2
+                if data[i] == '\x1b':  # 未匹配的 ESC，序列异常
+                    return start  # 不完整
+                i += 1
+            return start  # 序列不完整，等待更多数据
+
+        # === SS3 序列: \x1bO + 单个字母 ===
+        if c1 == 'O':
+            if start + 2 < n:
+                return start + 3  # \x1b + O + 字母
+            return start  # 不完整
+
+        # === 其他: \x1b + 单个字符（如 \x1b=, \x1b> 等） ===
+        return start + 2
 
     def handle_key_press(self, event):
         """处理键盘事件"""
@@ -1165,13 +1288,9 @@ class SessionTab(QWidget):
 
         if key == Qt.Key.Key_Return or key == Qt.Key.Key_Enter:
             if has_raw:
-                strategy.send_raw("\n")
-                # 本地即时回显换行：避免用户按回车后没有视觉反馈，消除"按回车没反应"的卡顿感
-                self.write_output('\n', 'text')
-                # 追踪 \r\n 用于 echo suppression（服务器回显通常为 \r\n，与本地回显的 \n 对齐消重）
-                self._local_echo_sent += '\r\n'
-                # 交互模式下清空本地输入追踪 + 重置ANSI颜色格式
-                # （作为颜色泄漏的防护层：命令提交时强制重置一次，防止上一条命令的颜色泄漏到下一条）
+                # 发送 \r (CR) — PTY 标准回车符，触发服务器执行命令并回显 \r\n
+                # 不做本地回显：服务器 PTY 会完整回显命令行+换行，本地回显会导致双显
+                strategy.send_raw("\r")
                 self.current_input = ""
                 if self.ansi_parser.enable_color:
                     self.ansi_parser.reset_format()
@@ -1182,19 +1301,11 @@ class SessionTab(QWidget):
         # 退格 / 删除
         if key == Qt.Key.Key_Backspace:
             if has_raw:
-                # 交互模式下始终发送退格符，交给服务器维护真正的输入缓冲区
-                # （避免因 current_input 与服务器回显不同步，导致"门禁判断"把退格拦截，造成删不掉）
-                strategy.send_raw(self._get_backspace_char())
-                # 本地仅做"尽力而为"的同步截断：非空时才删，防止负索引
+                # 发送 DEL (\x7f) — PTY 标准退格符，服务器负责删除字符并回显退格序列
+                # 不做本地退格回显：服务器 PTY 会回显 \b \b，本地回显会导致双重退格
+                strategy.send_raw("\x7f")
                 if self.current_input:
                     self.current_input = self.current_input[:-1]
-                # 本地即时显示退格效果：\b 移动光标 + 空格覆盖 + 再 \b 移回
-                #   —— 避免用户感觉"按了退格键没反应"，要等服务器回显才更新
-                self.write_output('\b \b', 'text')
-                # 同步维护本地echo消重队列：如果有尚未被服务器吸收的本地echo，
-                # 把最末尾的一个字符砍掉，保证后续服务器回显消重时长度一致。
-                if self._local_echo_sent:
-                    self._local_echo_sent = self._local_echo_sent[:-1]
             elif len(self.current_input) > 0:
                 self.current_input = self.current_input[:-1]
                 self.redraw_input_line()
@@ -1207,13 +1318,10 @@ class SessionTab(QWidget):
         # 普通字符
         if text:
             if has_raw:
+                # 发送字符到服务器，不做本地回显
+                # 服务器 PTY 会回显该字符，通过 poll_remote_output → _flush_output_buffer 显示
                 strategy.send_raw(text)
-                # 交互模式下本地追踪用户输入，与服务器回显分离维护
                 self.current_input += text
-                # 本地即时回显：保证用户一按键就能看到字符，消除"输入不及时显示"的延迟感。
-                # 后续服务器回显到达时，会通过 _local_echo_sent 匹配消重，避免双显。
-                self.write_output(text, 'text')
-                self._local_echo_sent += text
             else:
                 self.current_input += text
                 self.write_output(text, 'text')
@@ -1241,12 +1349,9 @@ class SessionTab(QWidget):
         has_raw = hasattr(strategy, 'send_raw') and self.interactive_mode
 
         if has_raw:
-            # 交互模式下本地追踪输入法文本，与服务器回显分离维护
+            # 交互模式：发送到服务器，由 PTY 回显，不做本地回显
             self.current_input += text
             strategy.send_raw(text)
-            # 本地即时回显：消除中文输入法提交时的显示延迟
-            self.write_output(text, 'text')
-            self._local_echo_sent += text
         else:
             self.current_input += text
             self.write_output(text, self._get_style('text', '#e0e0e0'))
@@ -1254,8 +1359,13 @@ class SessionTab(QWidget):
     def handle_paste_text(self, text):
         """处理粘贴的文本（来自 Ctrl+V 或右键菜单粘贴）
 
-        交互模式下直接将完整文本发送到远程 shell（包括换行符自动执行多条命令）；
-        非交互模式下追加到 current_input，遇到换行符时逐条 execute_command。
+        交互模式：
+        - 若远程 shell 已协商开启 bracketed paste（收到过 \\x1b[?2004h），
+          用 \\x1b[200~ ... \\x1b[201~ 包裹发送：readline 将整块内容作为一次
+          插入处理（Tab 不触发补全、换行不立即执行、长内容一次重绘），
+          避免长命令只回显后半段、粘贴中途执行等问题；
+        - 否则原样发送（兼容串口/老式 shell，Enter 仍由 \\r 触发）。
+        非交互模式：追加到 current_input，遇到换行符时逐条 execute_command。
         """
         if not self.connection_context.is_connected():
             return
@@ -1266,18 +1376,20 @@ class SessionTab(QWidget):
         has_raw = hasattr(strategy, 'send_raw') and self.interactive_mode
 
         if has_raw:
-            # 交互模式：直接发送（包括其中的换行符会触发远程执行）
-            strategy.send_raw(text)
-            # 本地追踪输入：仅保留最后一行内容（前面的行已随换行符执行）
-            lines = text.split('\n')
+            if self._bracketed_paste_enabled:
+                # 统一换行为 \n（Windows 剪贴板为 \r\n），包裹 bracketed paste 标记
+                normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+                strategy.send_raw('\x1b[200~' + normalized + '\x1b[201~')
+                lines = normalized.split('\n')
+            else:
+                # 未启用 bracketed paste：保持原样发送（串口设备依赖 \r 回车）
+                strategy.send_raw(text)
+                lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            # 本地输入追踪：取最后一行（去掉可能残留的 \r）
             self.current_input = lines[-1] if lines else ''
-            # 如果包含换行符，说明已有命令被执行，最后一行是新命令开头
             if '\n' in text:
-                # 标记需要从display提取（可能包含补全/提示信息）
+                # 多行粘贴后等待远程重绘完成，再从显示区同步输入内容
                 self._tab_pending = True
-            # 本地即时回显：让粘贴内容立即显示（防止网络卡顿导致无反馈）
-            self.write_output(text, 'text')
-            self._local_echo_sent += text
         else:
             # 非交互模式：若包含换行，逐条执行；否则追加到输入
             if '\n' in text:
@@ -1396,6 +1508,8 @@ class SessionTab(QWidget):
         self._connection_lost = False  # 重置连接中断标志
         self._tab_pending = False  # 重置Tab补全等待标志
         self.current_input = ""  # 重置本地输入追踪
+        self._bracketed_paste_enabled = False  # 重置bracketed paste标志（新shell会重新协商）
+        self._saved_cursor_pos = None
 
         # 恢复标签页标题（移除中断标记）
         parent = self.parent()
@@ -1445,7 +1559,12 @@ class SessionTab(QWidget):
                 if initial_output:
                     self.write_output(initial_output)
                 # 连接成功后立即根据终端实际宽度调整PTY大小，避免长路径无法显示
+                self._last_pty_size = None  # 强制重新测量
                 self._update_terminal_size()
+                # 布局稳定后再次测量（此时控件宽度才是最终值），
+                # 确保PTY列数与控件一致，避免长命令/长粘贴被readline水平滚动截断
+                QTimer.singleShot(300, self._update_terminal_size)
+                QTimer.singleShot(1500, self._update_terminal_size)
                 # 启动输出轮询，使用更短的间隔提高响应速度
                 self.output_timer.start(30)  # 30ms间隔，提高响应速度
             else:

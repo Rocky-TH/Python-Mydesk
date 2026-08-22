@@ -1,1 +1,5 @@
 **/__pycache__/
+.trae/
+logs/
+tests/
+debug.log

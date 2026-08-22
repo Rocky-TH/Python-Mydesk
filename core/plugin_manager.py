@@ -3,6 +3,7 @@ import os
 import sys
 
 from .menu_registry import MenuRegistry
+from utils.logger import Logger
 
 
 class PluginManager:
@@ -14,6 +15,7 @@ class PluginManager:
         self._status_callback = None
         # 保存每个插件最新上报的状态文本
         self._plugin_status = {}
+        self._logger = Logger.get_instance()
 
     def load_plugins(self, plugin_configs, config_manager=None):
         if config_manager:
@@ -22,7 +24,10 @@ class PluginManager:
             try:
                 self.load_plugin(config)
             except Exception as e:
-                print(f"Failed to load plugin {config.get('name', 'unknown')}: {e}")
+                self._logger.error(
+                    f"加载插件失败: {config.get('name', 'unknown')}: {e}",
+                    exc_info=True
+                )
 
     def load_plugin(self, config):
         name = config['name']
@@ -49,6 +54,7 @@ class PluginManager:
 
         self.plugins[name] = plugin_instance
         self.plugin_configs[name] = config
+        self._logger.info(f"插件已加载: {name} ({module_name}.{class_name})")
 
     def get_plugin(self, name):
         return self.plugins.get(name)
@@ -81,7 +87,13 @@ class PluginManager:
         """
         self._plugin_status[plugin_name] = status_text
         if self._status_callback:
-            self._status_callback(plugin_name, status_text)
+            try:
+                self._status_callback(plugin_name, status_text)
+            except Exception as e:
+                self._logger.error(
+                    f"插件状态回调执行失败: {plugin_name}: {e}",
+                    exc_info=True
+                )
 
     def get_tool_status(self, plugin_name):
         """获取指定插件的最新状态文本"""
@@ -114,5 +126,8 @@ class PluginManager:
             try:
                 register_fn(registry)
             except Exception as e:
-                print(f"Failed to collect menus from plugin {plugin_name}: {e}")
+                self._logger.error(
+                    f"收集插件菜单失败: {plugin_name}: {e}",
+                    exc_info=True
+                )
         return registry.get_menus()
