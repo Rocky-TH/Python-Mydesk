@@ -129,6 +129,41 @@ class TelnetConnection(ConnectionBase):
                 break
         return result
 
+    def enable_keepalive(self, interval=30):
+        """开启 TCP 保活，防止空闲连接被 NAT/防火墙超时断开
+
+        telnetlib 无应用层心跳，依赖 TCP SO_KEEPALIVE（Windows/Linux 均支持）。
+        """
+        interval = max(5, int(interval))
+        try:
+            import socket as _socket
+            if self.tn and getattr(self.tn, 'sock', None):
+                s = self.tn.sock
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+                # 精细参数在部分平台可用；Windows 上 TCP_KEEPIDLE/INTVL 也可能存在
+                if hasattr(_socket, 'TCP_KEEPIDLE'):
+                    s.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, interval)
+                if hasattr(_socket, 'TCP_KEEPINTVL'):
+                    s.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL,
+                                 max(1, interval // 3))
+        except Exception:
+            pass
+
+    def get_endpoints(self):
+        """返回 (本地地址, 远程地址) 字符串元组，供连接成功 banner 展示"""
+        local, remote = "", ""
+        try:
+            if self.tn and getattr(self.tn, 'sock', None):
+                laddr = self.tn.sock.getsockname()
+                raddr = self.tn.sock.getpeername()
+                if isinstance(laddr, tuple) and len(laddr) >= 2:
+                    local = f"{laddr[0]}:{laddr[1]}"
+                if isinstance(raddr, tuple) and len(raddr) >= 2:
+                    remote = f"{raddr[0]}:{raddr[1]}"
+        except Exception:
+            pass
+        return local, remote
+
     def is_connected(self):
         return self.connected
 

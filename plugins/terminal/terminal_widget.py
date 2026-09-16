@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import uuid
+from datetime import datetime
 from stat import S_ISDIR
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QSplitter,
@@ -11,10 +12,13 @@ from PyQt6.QtWidgets import (
     QTextEdit, QTabWidget, QTabBar, QMessageBox, QCheckBox,
     QListWidget, QListWidgetItem, QMenu, QDialog,
     QPlainTextEdit, QFileDialog, QProgressDialog, QApplication,
-    QDialogButtonBox
+    QDialogButtonBox, QFrame, QStackedWidget, QToolButton, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
-from PyQt6.QtGui import QFont, QAction, QTextCursor, QColor, QKeyEvent, QTextCharFormat, QCursor
+from PyQt6.QtGui import (
+    QFont, QAction, QTextCursor, QColor, QKeyEvent, QTextCharFormat,
+    QCursor, QKeySequence, QShortcut
+)
 from .connection_context import ConnectionContext
 from .ssh_connection import SSHConnection
 from .telnet_connection import TelnetConnection
@@ -25,10 +29,17 @@ from .ansi_parser import ANSIParser
 from plugins.script_runner import Session, ScriptRunner
 
 # 下拉框三角形箭头图片路径
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _DOWN_ARROW_IMG = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    _PROJECT_ROOT,
     'assets', 'down_arrow.png'
 ).replace('\\', '/')
+
+# 终端会话日志默认目录
+_TERMINAL_LOG_DIR = os.path.join(_PROJECT_ROOT, 'logs', 'terminal')
+
+# 保活发送间隔（秒）
+_KEEPALIVE_INTERVAL = 30
 
 
 class TerminalPlugin:
@@ -113,6 +124,26 @@ class TerminalPlugin:
             checked=toolbar_visible,
         )
 
+        builder.add_separator()
+
+        # 日志记录：勾选后每个会话的终端内容保存到 logs/terminal 目录
+        log_enabled = getattr(widget, '_log_enabled', False)
+        builder.add_action(
+            "日志记录",
+            lambda checked: widget.toggle_logging(checked),
+            checkable=True,
+            checked=log_enabled,
+        )
+
+        # 侧边栏：控制左侧保存链接栏显示/收缩
+        sidebar_visible = getattr(widget, '_sidebar_visible', True)
+        builder.add_action(
+            "侧边栏",
+            lambda checked: widget.toggle_sidebar(checked),
+            checkable=True,
+            checked=sidebar_visible,
+        )
+
 
 class TerminalEdit(QTextEdit):
     """自定义终端编辑控件，用于拦截键盘事件和输入法输入"""
@@ -125,6 +156,7 @@ class TerminalEdit(QTextEdit):
         super().__init__(parent)
         self._color_scheme = color_scheme or {}
         self._config_manager = config_manager
+        self._mouse_down = False  # 鼠标按下标记（拖选进行中，渲染层据此保护选区）
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.set_style()
 
@@ -190,6 +222,11 @@ class TerminalEdit(QTextEdit):
         def do_copy():
             selected = self.textCursor().selectedText()
             if selected:
+                # QTextEdit.selectedText() 用 U+2029/U+2028 表示段落/行分隔，
+                # 直接入剪贴板会导致外部应用/终端粘贴时无法识别换行；
+                # 先统一为 \n，再转为 Windows 剪贴板标准的 \r\n
+                selected = selected.replace('\u2029', '\n').replace('\u2028', '\n')
+                selected = selected.replace('\r\n', '\n').replace('\n', '\r\n')
                 QApplication.clipboard().setText(selected)
         copy_action.triggered.connect(do_copy)
         menu.addAction(copy_action)
@@ -214,8 +251,9 @@ class TerminalEdit(QTextEdit):
         menu.exec(event.globalPos())
 
     def mousePressEvent(self, event):
-        """记录点击前的光标位置（供 mouseRelease 恢复）"""
+        """记录点击前的光标位置（供 mouseRelease 恢复），并标记拖选进行中"""
         self._cursor_pos_before_mouse = self.textCursor().position()
+        self._mouse_down = True
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -223,9 +261,11 @@ class TerminalEdit(QTextEdit):
 
         终端光标位置由远程 shell 通过 ANSI 序列控制，
         鼠标点击不应改变它，否则会导致后续行内编辑回显插入错位。
-        拖选（复制场景）保留选区，渲染层会自行跳过选区光标。
+        拖选/双击选词（复制场景）保留选区，渲染层在选中保护模式下
+        不会触碰显示光标（见 SessionTab._render_text）。
         """
         super().mouseReleaseEvent(event)
+        self._mouse_down = False
         if not self.textCursor().hasSelection():
             pos = getattr(self, '_cursor_pos_before_mouse', None)
             if pos is not None:
@@ -235,6 +275,12 @@ class TerminalEdit(QTextEdit):
 
     def keyPressEvent(self, event):
         """拦截所有键盘事件并发送给父组件处理"""
+        # 终端标准行为：按键清除残留选区（拖选/双击选中的高亮），
+        # 恢复正常渲染与光标跟踪
+        if self.textCursor().hasSelection():
+            cur = self.textCursor()
+            cur.clearSelection()
+            self.setTextCursor(cur)
         self.key_pressed.emit(event)
         event.accept()
 
@@ -358,6 +404,7 @@ class SessionTab(QWidget):
         self.interactive_mode = False
         self._tab_pending = False  # Tab补全等待标志：下次输出时从display提取补全结果
         self._bracketed_paste_enabled = False  # 远端shell是否启用bracketed paste（收到 \x1b[?2004h 时置位）
+        self._application_cursor_mode = False  # DECCKM 应用光标键模式（收到 \x1b[?1h 时置位，方向/Home/End 改发 SS3 序列）
         self._saved_cursor_pos = None  # DECSC/DECRC (\x1b7/\x1b[s 保存的光标位置)
         # 使用主题文字颜色作为ANSI解析器默认前景色
         text_hex = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#cccccc'))
@@ -369,6 +416,11 @@ class SessionTab(QWidget):
         self._output_history_max = 2000  # 最大历史条目数，防止内存无限增长
         self._connection_lost = False  # 连接中断标志
         self._connection_worker = None  # 异步连接工作线程
+        # 会话日志：是否将终端内容写入日志文件（由全局设置开关控制）
+        self._log_enabled = False
+        self._log_dir = _TERMINAL_LOG_DIR
+        self._log_file = None
+        self._log_path = ""
 
         self.init_ui()
     
@@ -421,8 +473,8 @@ class SessionTab(QWidget):
                 background-color: transparent;
                 color: {text_color};
                 border: 1px solid {border};
-                border-radius: 4px;
-                margin: 4px;
+                border-radius: 8px;
+                margin: 6px;
             }}
             QTextEdit:focus {{
                 border: 2px solid {border_focus};
@@ -507,8 +559,8 @@ class SessionTab(QWidget):
                 background-color: transparent;
                 color: {text_color};
                 border: 1px solid {border};
-                border-radius: 4px;
-                margin: 4px;
+                border-radius: 8px;
+                margin: 6px;
             }}
             QTextEdit:focus {{
                 border: 2px solid {border_focus};
@@ -643,7 +695,76 @@ class SessionTab(QWidget):
             # 超出限制时丢弃最旧的部分
             self._output_history = self._output_history[-self._output_history_max:]
 
+        # 日志记录开启时同步写入会话日志文件（去除 ANSI 转义序列，保留终端文字内容）
+        self._write_session_log(text)
+
         self._render_text(text, color)
+
+    # ========== 会话日志 ==========
+
+    def set_logging(self, enabled):
+        """开启/关闭本会话的终端内容日志记录
+
+        - 开启时若尚未打开日志文件（如已连接状态下切换开关），立即创建；
+        - 关闭时关闭文件句柄。新连接的日志文件在 connect_with_config 时创建。
+        """
+        self._log_enabled = bool(enabled)
+        if self._log_enabled:
+            if self._log_file is None:
+                self._open_log_file()
+        else:
+            self._close_log_file()
+
+    def _open_log_file(self):
+        """为当前连接创建一个日志文件（每次连接生成一个新文件）"""
+        self._close_log_file()
+        if not self._log_enabled or not self._log_dir:
+            return
+        if not self.current_connection:
+            # 尚未发起连接（如开启日志开关后），等 connect_with_config 时再创建
+            return
+        conn = self.current_connection or {}
+        config = conn.get('config', {}) if isinstance(conn, dict) else {}
+        base = conn.get('name') or config.get('host') or config.get('port') or 'session'
+        safe_name = re.sub(r'[^A-Za-z0-9_.\-]', '_', str(base))[:40].strip('_') or 'session'
+        filename = f"terminal_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        try:
+            os.makedirs(self._log_dir, exist_ok=True)
+            self._log_path = os.path.join(self._log_dir, filename)
+            self._log_file = open(self._log_path, 'a', encoding='utf-8')
+            self._log_file.write(
+                f"===== 终端会话日志 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                f"{conn.get('name', '')} ({conn.get('type', '')}) =====\n"
+            )
+            self._log_file.flush()
+        except Exception as e:
+            print(f"打开终端日志文件失败: {e}")
+            self._log_file = None
+            self._log_path = ""
+
+    def _close_log_file(self):
+        """关闭日志文件句柄"""
+        if self._log_file is not None:
+            try:
+                self._log_file.write(
+                    f"===== 会话结束 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====\n"
+                )
+                self._log_file.close()
+            except Exception:
+                pass
+        self._log_file = None
+
+    def _write_session_log(self, text):
+        """将一段终端输出（去除 ANSI 序列后）追加到日志文件"""
+        if not self._log_enabled or self._log_file is None or not text:
+            return
+        try:
+            clean = self._strip_ansi(text)
+            clean = clean.replace('\r\n', '\n').replace('\r', '')
+            self._log_file.write(clean)
+            self._log_file.flush()
+        except Exception:
+            pass
 
     def _render_text(self, text, color=None):
         """将文本渲染到终端显示控件（内部方法，不记录历史）
@@ -656,19 +777,25 @@ class SessionTab(QWidget):
         if not text:
             return
 
+        # 选中保护模式判定：用户正在拖选（鼠标按下）或已存在选区（双击选词/拖选结果）
+        # 时，渲染过程不触碰显示光标，避免输出到达时选区被打断、
+        # 光标跳到最新内容处导致无法准确选中
+        preserve_selection = (getattr(self.terminal_display, '_mouse_down', False)
+                              or self.terminal_display.textCursor().hasSelection())
+
         # 光标起点策略（终端光标位置同步的关键）：
         # - 系统提示文本（color 参数，如连接提示、错误信息）：始终追加到文档末尾；
+        # - 选中保护模式：使用独立游标在文档末尾追加，不回写显示光标；
         # - 服务器回显：光标在最后一个文本块（当前输入行）时保持原位，使上一次
         #   渲染中通过 \x1b[D/\x1b[C 等序列移动到行中的光标得以延续，readline 的
         #   增量行编辑（\x1b[@ 插入、\x1b[P 删除）才能作用在正确位置；
         # - 光标不在最后一行（如用户点击了历史区）时：跳到文档末尾追加，
         #   避免把输出插入到历史文本中间。
         cursor = self.terminal_display.textCursor()
-        if color is not None:
+        if preserve_selection:
+            cursor = QTextCursor(self.terminal_display.document())
             cursor.movePosition(QTextCursor.MoveOperation.End)
-        elif cursor.hasSelection():
-            # 用户正在拖选复制：光标选区不可用于渲染定位，追加到文档末尾，
-            # 避免 insertText 替换掉用户选中的文本
+        elif color is not None:
             cursor.movePosition(QTextCursor.MoveOperation.End)
         else:
             doc = cursor.document()
@@ -698,10 +825,13 @@ class SessionTab(QWidget):
                 cursor.setCharFormat(part_format)
                 self._insert_text_with_cr(cursor, part_text)
 
-        self.terminal_display.setTextCursor(cursor)
-        # 仅在需要时滚动，减少频繁调用
-        if self._should_scroll():
-            self.terminal_display.ensureCursorVisible()
+        # 选中保护模式下不回写显示光标、不自动滚动（保持选区与视图稳定，便于复制）；
+        # 新输出已通过独立游标追加到文档末尾
+        if not preserve_selection:
+            self.terminal_display.setTextCursor(cursor)
+            # 仅在需要时滚动，减少频繁调用
+            if self._should_scroll():
+                self.terminal_display.ensureCursorVisible()
 
         # 更新current_input：仅在Tab补全等待状态下从显示内容提取
         # 交互模式下current_input由本地按键追踪维护，减少对display解析的依赖
@@ -1015,9 +1145,15 @@ class SessionTab(QWidget):
             if self._saved_cursor_pos is not None:
                 pos = max(0, min(self._saved_cursor_pos, cursor.document().characterCount() - 1))
                 cursor.setPosition(pos)
-        elif end_char in ('h', 'l') and private and 2004 in params:
-            # bracketed paste 模式协商：?2004h 开启 / ?2004l 关闭
-            self._bracketed_paste_enabled = (end_char == 'h')
+        elif end_char in ('h', 'l') and private:
+            # 私有模式协商
+            if 2004 in params:
+                # bracketed paste 模式协商：?2004h 开启 / ?2004l 关闭
+                self._bracketed_paste_enabled = (end_char == 'h')
+            if 1 in params:
+                # DECCKM 应用光标键模式：?1h 开启（方向/Home/End 改发 SS3 形式）
+                # / ?1l 关闭（CSI 形式）。vim/less 等全屏程序会开启此模式。
+                self._application_cursor_mode = (end_char == 'h')
         # 其余序列（r 滚动区域、L/M 插删行、S/T 滚动、I/Z 制表、
         # g 清制表位、q 光标样式、~ 功能键/粘贴标记、c/n 设备查询等）无显示效果，忽略
 
@@ -1070,6 +1206,9 @@ class SessionTab(QWidget):
         self.write_output("远程连接已断开，可能是网络故障或服务器关闭了连接\n", 'text-warning')
         self.write_output("如需重新连接，请点击左侧「新建连接」或右键选择「编辑连接」\n", 'text-hint')
         self.write_output(f"{separator}\n", 'text-danger')
+
+        # 中断后关闭本次会话日志
+        self._close_log_file()
 
         # 更新状态显示
         self._set_status("连接中断")
@@ -1249,23 +1388,46 @@ class SessionTab(QWidget):
             return
         elif key == Qt.Key.Key_Left:
             if has_raw:
-                strategy.send_raw("\x1b[D")
+                # Ctrl+左方向键：按词左跳（xterm 扩展修饰键序列）
+                if modifiers & Qt.KeyboardModifier.ControlModifier:
+                    strategy.send_raw("\x1b[1;5D")
+                else:
+                    strategy.send_raw("\x1b[D")
             return
         elif key == Qt.Key.Key_Right:
             if has_raw:
-                strategy.send_raw("\x1b[C")
+                # Ctrl+右方向键：按词右跳
+                if modifiers & Qt.KeyboardModifier.ControlModifier:
+                    strategy.send_raw("\x1b[1;5C")
+                else:
+                    strategy.send_raw("\x1b[C")
             return
 
         if key == Qt.Key.Key_Home:
             if has_raw:
-                strategy.send_raw("\x1b[H")
+                # DECCKM 应用模式（\x1b[?1h，vim/less 等开启）发送 SS3 形式；
+                # 普通模式发送 \x1b[1~（Debian/Ubuntu inputrc 与 readline
+                # 默认绑定的 Home 键序，PuTTY 等主流终端同样发送此序列）
+                if self._application_cursor_mode:
+                    strategy.send_raw("\x1bOH")
+                else:
+                    strategy.send_raw("\x1b[1~")
             return
         elif key == Qt.Key.Key_End:
             if has_raw:
-                strategy.send_raw("\x1b[F")
+                # End 键：应用模式 SS3 / 普通模式 \x1b[4~（同 Home 的兼容性策略）
+                if self._application_cursor_mode:
+                    strategy.send_raw("\x1bOF")
+                else:
+                    strategy.send_raw("\x1b[4~")
             return
 
-        if key == Qt.Key.Key_PageUp:
+        if key == Qt.Key.Key_Insert:
+            # Ins 键（xterm 各模式下均发送 \x1b[2~）
+            if has_raw:
+                strategy.send_raw("\x1b[2~")
+            return
+        elif key == Qt.Key.Key_PageUp:
             if has_raw:
                 strategy.send_raw("\x1b[5~")
             return
@@ -1356,6 +1518,43 @@ class SessionTab(QWidget):
             self.current_input += text
             self.write_output(text, self._get_style('text', '#e0e0e0'))
 
+    def exec_button_command(self, btn_name, command):
+        """以"模拟手工输入"方式执行按钮命令（交互式 PTY 会话）
+
+        显示效果与真实终端逐字输入完全一致，由服务器 PTY 负责回显：
+            demo@test:/$ >>> 执行按钮: <按钮名>
+            demo@test:/$ <命令>
+            <命令输出>
+            demo@test:/$
+
+        关键点：
+        - 头信息接在当前提示符行末，不主动换行；换行交给下面空回车的
+          \\r\\n 回显完成，避免本地/远端光标状态不同步；
+        - 先发空回车（\\r）让远端输出一个新提示符，再发送命令行，
+          命令回显才会带提示符前缀；
+        - 必须使用 \\r 提交（PTY 规范模式以 CR 作为行结束），
+          裸 \\n 在部分 tty 配置下不提交，会导致命令挂起不执行；
+        - 支持按钮命令含多行内容，逐行以 \\r 提交。
+        """
+        strategy = self.connection_context._strategy
+        if strategy is None or not hasattr(strategy, 'send_raw'):
+            return
+        # 1) 头信息追加到当前提示符行（换行由空回车回显产生）
+        self.write_output(f">>> 执行按钮: {btn_name}", 'text-info')
+        # 2) 空回车：远端回显 \r\n 换行并输出新提示符
+        strategy.send_raw("\r")
+        # 3) 规范化命令中的换行，逐行以 CR 提交；去掉尾部多余空行
+        cmd = (command or '').replace('\r\n', '\n').replace('\r', '\n')
+        lines = cmd.split('\n')
+        while lines and lines[-1] == '':
+            lines.pop()
+        for line in lines:
+            strategy.send_raw(line + "\r")
+        # 4) 重置本地输入追踪与颜色格式，后续由 PTY 回显驱动
+        self.current_input = ""
+        if self.ansi_parser.enable_color:
+            self.ansi_parser.reset_format()
+
     def handle_paste_text(self, text):
         """处理粘贴的文本（来自 Ctrl+V 或右键菜单粘贴）
 
@@ -1364,29 +1563,49 @@ class SessionTab(QWidget):
           用 \\x1b[200~ ... \\x1b[201~ 包裹发送：readline 将整块内容作为一次
           插入处理（Tab 不触发补全、换行不立即执行、长内容一次重绘），
           避免长命令只回显后半段、粘贴中途执行等问题；
-        - 否则原样发送（兼容串口/老式 shell，Enter 仍由 \\r 触发）。
+        - 否则逐行以 \\r 提交（\\r\\n/\\n/U+2028/U+2029 一律先归一化），
+          末尾不带换行时最后一行仅注入、留给用户回车确认。
         非交互模式：追加到 current_input，遇到换行符时逐条 execute_command。
-        """
+"""
         if not self.connection_context.is_connected():
             return
         if not text:
             return
+
+        # 统一换行表示：Windows 剪贴板为 \r\n、旧系统可能为 \r、
+        # Qt 文档/其他富文本来源可能使用 U+2028/U+2029 段落分隔符，
+        # 不归一化会导致粘贴多行内容时换行不识别（粘成一行或空行错乱）
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        text = text.replace('\u2028', '\n').replace('\u2029', '\n')
 
         strategy = self.connection_context._strategy
         has_raw = hasattr(strategy, 'send_raw') and self.interactive_mode
 
         if has_raw:
             if self._bracketed_paste_enabled:
-                # 统一换行为 \n（Windows 剪贴板为 \r\n），包裹 bracketed paste 标记
-                normalized = text.replace('\r\n', '\n').replace('\r', '\n')
-                strategy.send_raw('\x1b[200~' + normalized + '\x1b[201~')
-                lines = normalized.split('\n')
+                # 包裹 bracketed paste 标记，readline 整块插入、不立即执行
+                strategy.send_raw('\x1b[200~' + text + '\x1b[201~')
+                lines = text.split('\n')
+                # 本地输入追踪：取最后一行（等待用户按回车统一执行）
+                self.current_input = lines[-1] if lines else ''
             else:
-                # 未启用 bracketed paste：保持原样发送（串口设备依赖 \r 回车）
-                strategy.send_raw(text)
-                lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
-            # 本地输入追踪：取最后一行（去掉可能残留的 \r）
-            self.current_input = lines[-1] if lines else ''
+                # 未启用 bracketed paste：每个换行转为一次回车（CR）。
+                # PTY 规范模式以 CR 提交行；直接发 \r\n 会造成 CR、LF 各提交
+                # 一次（命令拆行/多一个空提示符），裸 \n 在部分 tty 下不提交。
+                # 末尾不带换行时，最后一行只注入不回车，留给用户确认执行。
+                lines = text.split('\n')
+                submit_all = text.endswith('\n')
+                if submit_all:
+                    # 去掉尾部空行，避免末尾换行多产生一个空命令提示符
+                    while lines and lines[-1] == '':
+                        lines.pop()
+                    payload = ''.join(line + '\r' for line in lines)
+                    pending = ''
+                else:
+                    payload = ''.join(line + '\r' for line in lines[:-1]) + lines[-1]
+                    pending = lines[-1]
+                strategy.send_raw(payload)
+                self.current_input = pending
             if '\n' in text:
                 # 多行粘贴后等待远程重绘完成，再从显示区同步输入内容
                 self._tab_pending = True
@@ -1509,7 +1728,10 @@ class SessionTab(QWidget):
         self._tab_pending = False  # 重置Tab补全等待标志
         self.current_input = ""  # 重置本地输入追踪
         self._bracketed_paste_enabled = False  # 重置bracketed paste标志（新shell会重新协商）
+        self._application_cursor_mode = False  # 重置DECCKM应用光标键模式标志（新shell会重新协商）
         self._saved_cursor_pos = None
+        # 为本次连接新建日志文件（日志开关开启时）；disconnect() 已先关闭旧文件
+        self._open_log_file()
 
         # 恢复标签页标题（移除中断标记）
         parent = self.parent()
@@ -1556,6 +1778,14 @@ class SessionTab(QWidget):
             # 检测是否支持交互模式
             if strategy and hasattr(strategy, 'send_raw') and hasattr(strategy, 'read_output'):
                 self.interactive_mode = True
+                # 默认开启连接保活，避免长时间空闲被 NAT/防火墙超时断开
+                if hasattr(strategy, 'enable_keepalive'):
+                    try:
+                        strategy.enable_keepalive(_KEEPALIVE_INTERVAL)
+                    except Exception:
+                        pass
+                # 连接成功 banner（双方地址、协议、时间等），先于服务器初始输出显示
+                self._write_connect_banner(conn_type, config, strategy)
                 if initial_output:
                     self.write_output(initial_output)
                 # 连接成功后立即根据终端实际宽度调整PTY大小，避免长路径无法显示
@@ -1569,11 +1799,11 @@ class SessionTab(QWidget):
                 self.output_timer.start(30)  # 30ms间隔，提高响应速度
             else:
                 self.interactive_mode = False
-                self.write_output("连接成功!\n", 'text-success')
-                self.write_output("-" * 50 + "\n", 'text-hint')
+                self._write_connect_banner(conn_type, config, strategy)
                 self.show_input_line()
 
-            self.setFocus()
+            # 连接成功后焦点交给终端输入区（重新连接/复制连接等操作无需再点击）
+            self.terminal_display.setFocus()
         else:
             self.write_output("连接失败!\n", 'text-danger')
             if error_msg:
@@ -1585,6 +1815,45 @@ class SessionTab(QWidget):
 
         # 清理工作线程引用
         self._connection_worker = None
+
+    def _write_connect_banner(self, conn_type, config, strategy):
+        """连接成功后输出 banner：连接名称、协议、本地/远程地址、用户、时间、保活状态"""
+        bar = '─' * 58
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.write_output(bar + '\n', 'text-hint')
+        self.write_output('✔ 连接成功\n', 'text-success')
+
+        name = (self.current_connection or {}).get('name', '')
+        if name:
+            self.write_output(f'  连接名称 : {name}\n', 'text-info')
+        self.write_output(f'  协议类型 : {(conn_type or "").upper() or "-"}\n', 'text-info')
+
+        if conn_type == 'serial':
+            self.write_output(
+                f'  本地串口 : {config.get("port", "-")} @ {config.get("baud", "-")} bps\n',
+                'text-info')
+            self.write_output('  对端设备 : 串口设备\n', 'text-info')
+        else:
+            local, remote = '', ''
+            if strategy is not None and hasattr(strategy, 'get_endpoints'):
+                try:
+                    local, remote = strategy.get_endpoints()
+                except Exception:
+                    local, remote = '', ''
+            host = config.get('host', '')
+            port = config.get('port', '')
+            if not remote and host:
+                remote = f"{host}:{port}"
+            self.write_output(f'  本地地址 : {local or "-"}\n', 'text-info')
+            self.write_output(f'  远程地址 : {remote or "-"}\n', 'text-info')
+            user = config.get('username', '')
+            if user:
+                self.write_output(f'  登录用户 : {user}\n', 'text-info')
+
+        self.write_output(f'  连接时间 : {now}\n', 'text-info')
+        if strategy is not None and hasattr(strategy, 'enable_keepalive'):
+            self.write_output(f'  保活     : 已开启（{_KEEPALIVE_INTERVAL} 秒）\n', 'text-hint')
+        self.write_output(bar + '\n', 'text-hint')
 
     def disconnect(self):
         """断开连接"""
@@ -1604,6 +1873,8 @@ class SessionTab(QWidget):
         self._refresh_status_label_style()
         self._set_conn_info("")
         self._set_conn_type("")
+        # 断开后关闭本次会话日志（"已断开连接"已在关闭前写入）
+        self._close_log_file()
 
         # 恢复标签页标题（移除中断标记）
         parent = self.parent()
@@ -1658,7 +1929,7 @@ class TerminalButtonToolbar(QWidget):
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 4px 12px;
                 font-size: {font_size_sm};
                 font-weight: bold;
@@ -1670,7 +1941,7 @@ class TerminalButtonToolbar(QWidget):
                 background-color: {primary};
                 color: #ffffff;
                 border: none;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 4px 12px;
                 font-size: {font_size_sm};
                 font-weight: bold;
@@ -1867,7 +2138,59 @@ class TerminalWidget(QWidget):
         self.current_session_id = None
         self._executing_workers = {}  # btn_id -> ButtonExecutionWorker（防 GC）
 
+        # 终端设置（日志开关、侧边栏可见性、快速连接栏保留的配置）
+        self._log_enabled = False
+        self._sidebar_visible = True
+        self._quick_conn_data = {}
+        self._load_terminal_settings()
+
         self.init_ui()
+
+        # 恢复侧边栏收缩状态
+        if not self._sidebar_visible:
+            self.toggle_sidebar(False)
+
+    # ========== 终端设置持久化 ==========
+
+    def _load_terminal_settings(self):
+        """加载终端设置（日志记录、侧边栏、快速连接栏数据）"""
+        if not self._config_manager:
+            return
+        data = self._config_manager.get_plugin_data('Terminal', 'terminal_settings')
+        if not isinstance(data, dict):
+            return
+        self._log_enabled = bool(data.get('log_enabled', False))
+        self._sidebar_visible = bool(data.get('sidebar_visible', True))
+        qc = data.get('quick_connect')
+        if isinstance(qc, dict):
+            self._quick_conn_data = qc
+
+    def _save_terminal_settings(self):
+        """持久化终端设置"""
+        if not self._config_manager:
+            return
+        data = {
+            'log_enabled': bool(self._log_enabled),
+            'sidebar_visible': bool(self._sidebar_visible),
+            'quick_connect': self._quick_conn_data,
+        }
+        self._config_manager.set_plugin_data('Terminal', 'terminal_settings', data)
+        self._config_manager.save_plugin_data('Terminal', 'terminal_settings')
+
+    def toggle_logging(self, checked):
+        """切换终端内容日志记录（菜单开关）"""
+        self._log_enabled = bool(checked)
+        self._save_terminal_settings()
+        for sess in self.sessions.values():
+            tab = sess.get('tab')
+            if tab is not None:
+                tab.set_logging(self._log_enabled)
+        if self._plugin_manager_ref and hasattr(self._plugin_manager_ref, 'set_tool_status'):
+            if self._log_enabled:
+                status = f"日志记录已开启（{_TERMINAL_LOG_DIR}）"
+            else:
+                status = "日志记录已关闭"
+            self._plugin_manager_ref.set_tool_status('Terminal', status)
     
     def _get_color_scheme(self):
         """获取颜色方案配置"""
@@ -1898,6 +2221,92 @@ class TerminalWidget(QWidget):
             return '#3c3c3c', '#e0e0e0'  # 深灰色背景 + 浅色文字（高对比度）
         else:
             return '#c8c8c8', '#1e1e1e'  # 灰色背景 + 深色文字（高对比度）
+
+    def _connection_list_qss(self):
+        """保存链接列表样式（Tabby 风格：圆角条目，无分割线）
+
+        Returns:
+            str: QListWidget 的 QSS
+        """
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        text_primary = self._get_style('text', '#ffffff')
+        selected_bg, selected_text = self._get_selected_colors()
+        font_size_normal = self._get_font_size('size-md', '12px')
+        return f"""
+            QListWidget {{
+                background-color: {bg_main};
+                color: {text_primary};
+                border: none;
+                padding: 2px 0px;
+            }}
+            QListWidget::item {{
+                padding: 4px 8px;
+                margin: 1px 4px;
+                border-radius: 4px;
+                font-size: {font_size_normal};
+            }}
+            QListWidget::item:selected {{
+                background-color: {selected_bg};
+                color: {selected_text};
+            }}
+            QListWidget::item:hover {{
+                background-color: {bg_tertiary};
+            }}
+        """
+
+    def _tab_bar_qss(self):
+        """会话标签栏样式（Tabby 风格：圆角浮起标签片，无生硬边框）
+
+        Returns:
+            str: QTabWidget/QTabBar 的 QSS
+        """
+        bg_main = self._get_style('bg-main', '#1e1e1e')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        text_primary = self._get_style('text', '#ffffff')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
+        font_size_normal = self._get_font_size('size-md', '12px')
+        # 选中标签使用更亮的浮起色，与悬停态（bg-input）形成区分
+        if self._is_dark_theme():
+            tab_sel_bg, tab_sel_text = '#454545', '#ffffff'
+        else:
+            tab_sel_bg, tab_sel_text = '#f9f9f9', '#1e1e1e'
+
+        return f"""
+            QTabWidget::pane {{
+                border: none;
+                background-color: {bg_main};
+            }}
+            QTabBar {{
+                background: transparent;
+            }}
+            QTabBar::tab {{
+                background-color: {bg_tertiary};
+                color: {text_secondary};
+                padding: 4px 14px;
+                min-width: 64px;
+                border: none;
+                margin-right: 4px;
+                margin-top: 3px;
+                margin-bottom: 3px;
+                border-radius: 6px;
+                font-size: {font_size_normal};
+                font-weight: 500;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {tab_sel_bg};
+                color: {tab_sel_text};
+                font-weight: bold;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background-color: {bg_input};
+                color: {text_primary};
+            }}
+            QTabBar::tab:closable {{
+                margin-left: 5px;
+            }}
+        """
 
     def _get_style(self, key, default=None):
         """获取样式配置（支持新旧两种格式）"""
@@ -1994,7 +2403,8 @@ class TerminalWidget(QWidget):
         # 统一按钮样式：蓝色背景 + 白色字体 + 加粗
         unified_btn_css = self._get_button_css('button')
 
-        # 第一行：新建连接、SFTP
+        # 操作按钮行：新建连接、SFTP
+        # （重新连接/复制连接已移至会话标签页右键菜单及快捷键）
         row1 = QHBoxLayout()
         row1.setSpacing(4)
         self.new_conn_btn = QPushButton("新建连接")
@@ -2010,22 +2420,6 @@ class TerminalWidget(QWidget):
         row1.addWidget(self.sftp_btn)
         quick_layout.addLayout(row1)
 
-        # 第二行：重新连接、复制连接
-        row2 = QHBoxLayout()
-        row2.setSpacing(4)
-        self.reconnect_btn = QPushButton("重新连接")
-        self.reconnect_btn.setFixedHeight(32)
-        self.reconnect_btn.clicked.connect(self.reconnect_last)
-        self.reconnect_btn.setStyleSheet(unified_btn_css)
-        row2.addWidget(self.reconnect_btn)
-
-        self.copy_conn_btn = QPushButton("复制连接")
-        self.copy_conn_btn.setFixedHeight(32)
-        self.copy_conn_btn.clicked.connect(self.copy_current_connection)
-        self.copy_conn_btn.setStyleSheet(unified_btn_css)
-        row2.addWidget(self.copy_conn_btn)
-        quick_layout.addLayout(row2)
-
         sidebar_layout.addWidget(self.quick_actions)
 
         bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
@@ -2035,43 +2429,55 @@ class TerminalWidget(QWidget):
         selected_bg, selected_text = self._get_selected_colors()
         font_size_normal = self._get_font_size('size-md', '12px')
 
-        session_label = QLabel("保存链接")
-        session_label.setStyleSheet(f"""
+        # 保存链接标题栏：标题 + 收缩侧边栏按钮
+        self.sidebar_header = QWidget()
+        self.sidebar_header.setStyleSheet(f"background-color: {bg_tertiary};")
+        header_layout = QHBoxLayout(self.sidebar_header)
+        header_layout.setContentsMargins(8, 4, 4, 4)
+        header_layout.setSpacing(4)
+
+        self.saved_links_label = QLabel("保存链接")
+        self.saved_links_label.setStyleSheet(f"""
             QLabel {{
-                background-color: {bg_tertiary};
+                background-color: transparent;
                 color: {text_primary};
-                padding: 10px 8px;
+                padding: 6px 0px;
                 font-weight: bold;
                 font-size: {font_size};
-                border-bottom: 1px solid {border_light};
+                border: none;
             }}
         """)
-        session_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sidebar_layout.addWidget(session_label)
+        self.saved_links_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addWidget(self.saved_links_label)
+        header_layout.addStretch()
+
+        # 收缩按钮（«）：点击后隐藏侧边栏，显示左侧窄条恢复按钮
+        self.collapse_sidebar_btn = QToolButton()
+        self.collapse_sidebar_btn.setText("«")
+        self.collapse_sidebar_btn.setFixedSize(24, 24)
+        self.collapse_sidebar_btn.setToolTip("收起侧边栏")
+        self.collapse_sidebar_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.collapse_sidebar_btn.clicked.connect(lambda: self.toggle_sidebar(False))
+        self.collapse_sidebar_btn.setStyleSheet(f"""
+            QToolButton {{
+                background-color: transparent;
+                color: {text_primary};
+                border: none;
+                font-size: {font_size};
+            }}
+            QToolButton:hover {{
+                background-color: {bg_input};
+                border-radius: 4px;
+            }}
+        """)
+        header_layout.addWidget(self.collapse_sidebar_btn)
+        sidebar_layout.addWidget(self.sidebar_header)
 
         self.connection_list = QListWidget()
         self.connection_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.connection_list.customContextMenuRequested.connect(self.show_connection_menu)
         self.connection_list.doubleClicked.connect(self.on_connection_double_click)
-        self.connection_list.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {bg_main};
-                color: {text_primary};
-                border: none;
-            }}
-            QListWidget::item {{
-                padding: 3px 8px;
-                border-bottom: 1px solid {border};
-                font-size: {font_size_normal};
-            }}
-            QListWidget::item:selected {{
-                background-color: {selected_bg};
-                color: {selected_text};
-            }}
-            QListWidget::item:hover {{
-                background-color: {bg_tertiary};
-            }}
-        """)
+        self.connection_list.setStyleSheet(self._connection_list_qss())
         sidebar_layout.addWidget(self.connection_list)
 
         self.current_font_size = 11
@@ -2088,41 +2494,24 @@ class TerminalWidget(QWidget):
         self.session_tabs = QTabWidget()
         self.session_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.session_tabs.setTabsClosable(True)
+        # 允许拖动调整连接选项卡位置（QTabWidget 原生支持）
+        self.session_tabs.setMovable(True)
         self.session_tabs.tabCloseRequested.connect(self.close_session)
-        self.session_tabs.setStyleSheet(f"""
-            QTabWidget::pane {{
-                border: none;
-                background-color: {bg_main};
-            }}
-            QTabBar::tab {{
-                background-color: {bg_tertiary};
-                color: {text_secondary};
-                padding: 8px 16px;
-                border: 1px solid {border};
-                border-bottom: none;
-                margin-right: 2px;
-                margin-top: 4px;
-                border-top-left-radius: {border_radius_normal};
-                border-top-right-radius: {border_radius_normal};
-                font-size: {font_size_normal};
-                font-weight: 500;
-            }}
-            QTabBar::tab:selected {{
-                background-color: {selected_bg};
-                color: {selected_text};
-                border-color: {selected_bg};
-                font-weight: bold;
-            }}
-            QTabBar::tab:hover:!selected {{
-                background-color: {bg_input};
-                color: {text_primary};
-            }}
-            QTabBar::tab:closable {{
-                margin-left: 5px;
-            }}
-        """)
+        self.session_tabs.tabBar().tabMoved.connect(self._on_session_tab_moved)
+        self.session_tabs.setStyleSheet(self._tab_bar_qss())
         self.session_tabs.currentChanged.connect(self.on_session_changed)
-        right_layout.addWidget(self.session_tabs)
+
+        # 会话标签页右键菜单：复制连接 / 重新连接 / 断开连接（含快捷键）
+        self._init_tab_context_actions()
+        self.session_tabs.tabBar().setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.session_tabs.tabBar().customContextMenuRequested.connect(
+            self.show_tab_context_menu)
+
+        right_layout.addWidget(self.session_tabs, 1)
+
+        # 顶部快速连接栏：填好参数一键连接，连接后保留配置方便复用
+        self._init_quick_connect_bar(right_layout, unified_btn_css)
 
         # 底部自定义按钮工具栏（与输出框作为一个整体，宽度对齐）
         self._button_toolbar_visible = True
@@ -2130,6 +2519,35 @@ class TerminalWidget(QWidget):
         self.button_toolbar.button_triggered.connect(self._execute_button)
         self._load_button_toolbar_visible()
         right_layout.addWidget(self.button_toolbar, 0)
+
+        # 侧边栏收缩后显示的窄恢复条（默认隐藏）
+        self.sidebar_expand_bar = QFrame()
+        self.sidebar_expand_bar.setFixedWidth(22)
+        self.sidebar_expand_bar.setStyleSheet(f"background-color: {bg_secondary};")
+        expand_layout = QVBoxLayout(self.sidebar_expand_bar)
+        expand_layout.setContentsMargins(0, 6, 0, 0)
+        expand_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.expand_sidebar_btn = QToolButton()
+        self.expand_sidebar_btn.setText("»")
+        self.expand_sidebar_btn.setFixedSize(20, 24)
+        self.expand_sidebar_btn.setToolTip("展开侧边栏")
+        self.expand_sidebar_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.expand_sidebar_btn.clicked.connect(lambda: self.toggle_sidebar(True))
+        self.expand_sidebar_btn.setStyleSheet(f"""
+            QToolButton {{
+                background-color: transparent;
+                color: {text_primary};
+                border: none;
+                font-size: {font_size};
+            }}
+            QToolButton:hover {{
+                background-color: {bg_input};
+                border-radius: 4px;
+            }}
+        """)
+        expand_layout.addWidget(self.expand_sidebar_btn)
+        self.sidebar_expand_bar.hide()
+        main_layout.addWidget(self.sidebar_expand_bar)
 
         # Add to splitter
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2140,6 +2558,7 @@ class TerminalWidget(QWidget):
         self.splitter.setSizes([220, 780])  # 初始宽度：侧边栏220，右侧780
         self.splitter.setHandleWidth(4)  # 拖拽手柄宽度
         self.splitter.setChildrenCollapsible(False)  # 防止子组件被折叠
+        self._sidebar_saved_width = 220  # 收缩前侧边栏宽度，展开时恢复
 
         main_layout.addWidget(self.splitter)
 
@@ -2174,7 +2593,7 @@ class TerminalWidget(QWidget):
         welcome_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(welcome_label)
         
-        hint_label = QLabel("点击左侧「新建连接」开始使用")
+        hint_label = QLabel("通过上方「快速连接」或左侧「新建连接」开始使用")
         hint_label.setStyleSheet(f"""
             QLabel {{
                 color: {text_secondary};
@@ -2184,12 +2603,534 @@ class TerminalWidget(QWidget):
         """)
         hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(hint_label)
-        
+
+        # 快捷键提示面板
+        self.welcome_shortcut_panel = self._make_welcome_shortcut_panel()
+        empty_layout.addWidget(self.welcome_shortcut_panel, 0, Qt.AlignmentFlag.AlignCenter)
+
         empty_layout.addStretch()
         
         # 将空白页面添加到标签页（不可关闭）
         self.session_tabs.addTab(self.empty_page, "欢迎")
         self.session_tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)
+
+    # 欢迎页快捷键条目（与 Tab 右键菜单/全局快捷键保持一致）
+    _WELCOME_SHORTCUTS = [
+        ("Ctrl+Shift+D", "复制当前连接"),
+        ("Ctrl+Shift+R", "重新连接"),
+        ("Ctrl+Shift+K", "断开连接"),
+        ("Ctrl+Shift+W", "关闭连接"),
+        ("F5", "刷新连接列表"),
+    ]
+
+    def _make_welcome_shortcut_panel(self):
+        """构建欢迎页快捷键提示面板（样式随主题刷新）"""
+        panel = QFrame()
+        panel.setObjectName("welcome_shortcut_panel")
+
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(20, 12, 20, 14)
+        lay.setSpacing(8)
+
+        title = QLabel("快捷键提示")
+        title.setObjectName("welcome_shortcut_title")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title)
+
+        content = QLabel()
+        content.setObjectName("welcome_shortcut_text")
+        content.setTextFormat(Qt.TextFormat.RichText)
+        content.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        lay.addWidget(content)
+
+        note = QLabel("在会话标签上单击右键，也可调出「复制连接 / 重新连接 / 断开连接 / 关闭连接」菜单")
+        note.setObjectName("welcome_shortcut_note")
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(note)
+
+        self._style_welcome_shortcut_panel(panel)
+        return panel
+
+    def _style_welcome_shortcut_panel(self, panel):
+        """按当前主题刷新欢迎页快捷键面板样式"""
+        bg = self._get_style('bg-tertiary', '#2d2d30')
+        border = self._get_style('border-light', '#5a5a5d')
+        primary = self._get_style('primary', '#3a8fd4')
+        text_primary = self._get_style('text', '#ffffff')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
+        font_size_md = self._get_font_size('size-md', '12px')
+
+        panel.setStyleSheet(f"""
+            QFrame#welcome_shortcut_panel {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+            }}
+            QLabel#welcome_shortcut_title {{
+                color: {text_primary};
+                font-size: 13px;
+                font-weight: bold;
+                background: transparent;
+            }}
+            QLabel#welcome_shortcut_note {{
+                color: {text_secondary};
+                font-size: {font_size_md};
+                background: transparent;
+            }}
+        """)
+
+        rows = []
+        for key, desc in self._WELCOME_SHORTCUTS:
+            rows.append(
+                "<tr>"
+                f"<td style='color:{primary}; font-weight:bold; font-family:Consolas,monospace;' "
+                "align='right' nowrap='nowrap'>"
+                f"{key}</td>"
+                f"<td style='color:{text_secondary}; padding-left:18px;' nowrap='nowrap'>{desc}</td>"
+                "</tr>"
+            )
+        content = panel.findChild(QLabel, "welcome_shortcut_text")
+        if content is not None:
+            content.setStyleSheet("background: transparent;")
+            content.setText(
+                "<table cellspacing='0' cellpadding='3'>" + "".join(rows) + "</table>"
+            )
+
+    # ========== 快速连接栏 ==========
+
+    def _quick_bar_qss(self):
+        """快速连接栏的主题样式（初始化/主题切换时复用）"""
+        bg_bar = self._get_style('bg-secondary', '#252526')
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        text_primary = self._get_style('text', '#ffffff')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        border_focus = self._get_style('border-focus', '#007acc')
+        bg_input_focus = self._get_style('bg-input-focus', '#4c4c4c')
+        bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
+        selection = self._get_style('selection', '#007acc')
+        font_size_normal = self._get_font_size('size-md', '12px')
+        return f"""
+            QWidget#quick_bar {{
+                background-color: {bg_bar};
+                border-bottom: 1px solid {self._get_style('border', '#3c3c3c')};
+            }}
+            QLabel#quick_bar_title {{
+                color: {text_secondary};
+                background: transparent;
+                font-size: {font_size_normal};
+                font-weight: bold;
+            }}
+            QLineEdit, QSpinBox, QComboBox {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
+                padding: 3px 8px;
+                border-radius: 6px;
+                font-size: {font_size_normal};
+                min-height: 22px;
+            }}
+            QLineEdit:focus, QSpinBox:focus, QComboBox:hover {{
+                border-color: {border_focus};
+                background-color: {bg_input_focus};
+            }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox::down-arrow {{ image: url({_DOWN_ARROW_IMG}); }}
+            QComboBox QAbstractItemView {{
+                background-color: {bg_tertiary};
+                color: {text_primary};
+                selection-background-color: {selection};
+                selection-color: #ffffff;
+                border: 1px solid {border_light};
+                border-radius: 4px;
+            }}
+            QPushButton#qc_connect_btn {{
+                background-color: {self._get_style('primary', '#3a8fd4')};
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 18px;
+                font-size: {font_size_normal};
+                font-weight: bold;
+            }}
+            QPushButton#qc_connect_btn:hover {{
+                background-color: {self._get_style('primary-hover', '#4a9fe4')};
+            }}
+            QPushButton#qc_connect_btn:pressed {{
+                background-color: {self._get_style('primary-pressed', '#2a7fc4')};
+            }}
+            QPushButton#qc_key_browse_btn {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
+                border-radius: 6px;
+                font-size: {font_size_normal};
+            }}
+            QPushButton#qc_key_browse_btn:hover {{
+                border-color: {border_focus};
+                background-color: {bg_input_focus};
+            }}
+        """
+
+    def _init_quick_connect_bar(self, right_layout, btn_css=None):
+        """构建顶部快速连接栏
+
+        网络类型（ssh/telnet）：主机、端口、用户名、密码；
+        串口类型：串口号、波特率。连接成功后所有输入均保留，
+        并持久化到插件数据，下次启动自动恢复，方便重复连接。
+        """
+        self.quick_bar = QWidget()
+        self.quick_bar.setObjectName("quick_bar")
+        bar = QHBoxLayout(self.quick_bar)
+        bar.setContentsMargins(8, 4, 8, 4)
+        bar.setSpacing(6)
+
+        title = QLabel("快速连接")
+        title.setObjectName("quick_bar_title")
+        bar.addWidget(title)
+
+        self.qc_type_combo = QComboBox()
+        self.qc_type_combo.addItems(["ssh", "telnet", "serial"])
+        self.qc_type_combo.setFixedWidth(76)
+        self.qc_type_combo.currentTextChanged.connect(self._on_quick_type_changed)
+        bar.addWidget(self.qc_type_combo)
+
+        # 网络连接参数页
+        net_page = QWidget()
+        nl = QHBoxLayout(net_page)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(6)
+        self.qc_host_input = QLineEdit()
+        self.qc_host_input.setPlaceholderText("主机地址")
+        self.qc_host_input.setFixedWidth(195)  # 地址框固定宽度（原弹性宽度收窄约50%）
+        nl.addWidget(self.qc_host_input)
+        self.qc_port_input = QSpinBox()
+        self.qc_port_input.setRange(1, 65535)
+        self.qc_port_input.setValue(22)
+        self.qc_port_input.setButtonSymbols(
+            QSpinBox.ButtonSymbols.NoButtons)  # 不显示增减按钮，仅手动输入
+        self.qc_port_input.setFixedWidth(64)   # 无按钮后按5位端口号收窄
+        nl.addWidget(self.qc_port_input)
+        self.qc_user_input = QLineEdit()
+        self.qc_user_input.setPlaceholderText("用户名")
+        self.qc_user_input.setFixedWidth(96)
+        nl.addWidget(self.qc_user_input)
+        self.qc_password_input = QLineEdit()
+        self.qc_password_input.setPlaceholderText("密码")
+        self.qc_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.qc_password_input.setFixedWidth(96)
+        nl.addWidget(self.qc_password_input)
+        # SSH 密钥文件选择（输入框 + 浏览按钮），与主机框平分弹性宽度
+        self.qc_keyfile_widget = QWidget()
+        kl = QHBoxLayout(self.qc_keyfile_widget)
+        kl.setContentsMargins(0, 0, 0, 0)
+        kl.setSpacing(4)
+        self.qc_keyfile_input = QLineEdit()
+        self.qc_keyfile_input.setPlaceholderText("密钥文件（与密码任一即可）")
+        self.qc_keyfile_input.setMinimumWidth(90)
+        kl.addWidget(self.qc_keyfile_input, 1)
+        self.qc_key_browse_btn = QPushButton("…")
+        self.qc_key_browse_btn.setObjectName("qc_key_browse_btn")
+        self.qc_key_browse_btn.setFixedWidth(30)
+        self.qc_key_browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.qc_key_browse_btn.setToolTip("选择密钥文件")
+        self.qc_key_browse_btn.clicked.connect(self._browse_quick_key_file)
+        kl.addWidget(self.qc_key_browse_btn)
+        nl.addWidget(self.qc_keyfile_widget, 1)
+
+        # 串口参数页
+        serial_page = QWidget()
+        sl = QHBoxLayout(serial_page)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        self.qc_serial_combo = QComboBox()
+        self.qc_serial_combo.setEditable(True)
+        self.qc_serial_combo.addItems([f'COM{i}' for i in range(1, 21)])
+        self.qc_serial_combo.setMinimumWidth(130)
+        sl.addWidget(self.qc_serial_combo, 1)
+        sl.addWidget(QLabel("波特率"))
+        self.qc_baud_combo = QComboBox()
+        self.qc_baud_combo.setEditable(True)
+        self.qc_baud_combo.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.qc_baud_combo.setCurrentText("115200")
+        self.qc_baud_combo.setFixedWidth(96)
+        sl.addWidget(self.qc_baud_combo)
+        sl.addStretch()
+
+        self.qc_stack = QStackedWidget()
+        self.qc_stack.addWidget(net_page)
+        self.qc_stack.addWidget(serial_page)
+        self.qc_stack.setFixedHeight(30)
+        bar.addWidget(self.qc_stack, 1)
+
+        self.qc_connect_btn = QPushButton("连接")
+        self.qc_connect_btn.setObjectName("qc_connect_btn")
+        self.qc_connect_btn.setFixedHeight(28)
+        self.qc_connect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.qc_connect_btn.clicked.connect(self._do_quick_connect)
+        bar.addWidget(self.qc_connect_btn)
+
+        self.quick_bar.setFixedHeight(38)  # 固定高度，避免垂直方向抢占会话区空间
+        self.quick_bar.setStyleSheet(self._quick_bar_qss())
+        # 快速栏位于标签页上方
+        right_layout.insertWidget(0, self.quick_bar)
+
+        # 恢复上次保留的快速连接配置（不清空）
+        self._restore_quick_conn_data()
+        # 仅按当前类型初始化参数页与密钥框可见性（不重置端口，避免覆盖恢复值）
+        cur_type = self.qc_type_combo.currentText()
+        self.qc_stack.setCurrentIndex(1 if cur_type == "serial" else 0)
+        self.qc_keyfile_widget.setVisible(cur_type == "ssh")
+
+    def _on_quick_type_changed(self, conn_type):
+        """切换快速连接类型：切换参数页并设置默认端口"""
+        if not hasattr(self, 'qc_stack'):
+            return
+        self.qc_stack.setCurrentIndex(1 if conn_type == "serial" else 0)
+        if conn_type == "ssh":
+            self.qc_port_input.setValue(22)
+        elif conn_type == "telnet":
+            self.qc_port_input.setValue(23)
+        # 密钥文件仅 SSH 使用
+        if hasattr(self, 'qc_keyfile_widget'):
+            self.qc_keyfile_widget.setVisible(conn_type == "ssh")
+
+    def _browse_quick_key_file(self):
+        """快速连接栏：浏览选择 SSH 密钥文件"""
+        from PyQt6.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择密钥文件",
+            self.qc_keyfile_input.text() or "",
+            "密钥文件 (*.pem *.key);;所有文件 (*)"
+        )
+        if file_path:
+            self.qc_keyfile_input.setText(file_path)
+
+    def _collect_quick_conn_data(self):
+        """收集快速连接栏当前配置（用于持久化，连接后不清理）"""
+        return {
+            'type': self.qc_type_combo.currentText(),
+            'host': self.qc_host_input.text().strip(),
+            'port': self.qc_port_input.value(),
+            'username': self.qc_user_input.text(),
+            'password': self.qc_password_input.text(),
+            'key_file': self.qc_keyfile_input.text().strip(),
+            'serial_port': self.qc_serial_combo.currentText().strip(),
+            'baud': self.qc_baud_combo.currentText().strip(),
+        }
+
+    def _restore_quick_conn_data(self):
+        """从持久化数据恢复快速连接栏内容"""
+        data = self._quick_conn_data
+        if not data:
+            return
+        conn_type = data.get('type', 'ssh')
+        if conn_type in ("ssh", "telnet", "serial"):
+            self.qc_type_combo.setCurrentText(conn_type)
+        self.qc_host_input.setText(data.get('host', ''))
+        try:
+            port = int(data.get('port', 0))
+            if 1 <= port <= 65535:
+                self.qc_port_input.setValue(port)
+        except (ValueError, TypeError):
+            pass
+        self.qc_user_input.setText(data.get('username', ''))
+        self.qc_password_input.setText(data.get('password', ''))
+        self.qc_keyfile_input.setText(data.get('key_file', ''))
+        if data.get('serial_port'):
+            self.qc_serial_combo.setCurrentText(data['serial_port'])
+        if data.get('baud'):
+            self.qc_baud_combo.setCurrentText(str(data['baud']))
+
+    def _do_quick_connect(self):
+        """使用快速连接栏的配置发起连接（连接后保留配置）"""
+        conn_type = self.qc_type_combo.currentText()
+        if conn_type == 'serial':
+            serial_port = self.qc_serial_combo.currentText().strip()
+            if not serial_port:
+                QMessageBox.warning(self, "提示", "请填写串口号")
+                return
+            try:
+                baud = int(self.qc_baud_combo.currentText().strip() or '115200')
+            except ValueError:
+                baud = 115200
+            conn = {
+                'name': serial_port,
+                'type': 'serial',
+                'config': {'port': serial_port, 'baud': baud},
+            }
+        else:
+            host = self.qc_host_input.text().strip()
+            if not host:
+                QMessageBox.warning(self, "提示", "请填写主机地址")
+                self.qc_host_input.setFocus()
+                return
+            password = self.qc_password_input.text()
+            key_file = self.qc_keyfile_input.text().strip()
+            # SSH：密码与密钥文件任一存在即可
+            if conn_type == 'ssh' and not password and not key_file:
+                QMessageBox.warning(self, "提示", "请填写密码或选择密钥文件")
+                self.qc_password_input.setFocus()
+                return
+            port = self.qc_port_input.value()
+            config = {
+                'host': host,
+                'port': port,
+                'username': self.qc_user_input.text().strip(),
+                'password': password,
+            }
+            if conn_type == 'ssh':
+                config['key_file'] = key_file
+            conn = {
+                'name': host,
+                'type': conn_type,
+                'config': config,
+            }
+        # 保留并持久化配置，方便下一次直接连接
+        self._quick_conn_data = self._collect_quick_conn_data()
+        self._save_terminal_settings()
+        self.create_session(conn)
+
+    # ========== 会话标签页右键菜单/快捷键 ==========
+
+    def _init_tab_context_actions(self):
+        """创建会话标签页右键菜单动作及全局快捷键
+
+        QAction 仅承载菜单项文本（不在菜单中显示快捷键提示），
+        快捷键功能由下方 QShortcut 提供。
+        """
+        self.act_tab_duplicate = QAction("复制连接", self)
+        self.act_tab_duplicate.triggered.connect(self._action_tab_duplicate)
+
+        self.act_tab_reconnect = QAction("重新连接", self)
+        self.act_tab_reconnect.triggered.connect(self._action_tab_reconnect)
+
+        self.act_tab_disconnect = QAction("断开连接", self)
+        self.act_tab_disconnect.triggered.connect(self._action_tab_disconnect)
+
+        self.act_tab_close = QAction("关闭连接", self)
+        self.act_tab_close.triggered.connect(self._action_tab_close)
+
+        # QShortcut 保证动作在终端工具窗口内随时可用（焦点在终端控件中也能触发）
+        QShortcut(QKeySequence("Ctrl+Shift+D"), self,
+                  context=Qt.ShortcutContext.WindowShortcut,
+                  activated=self._action_tab_duplicate)
+        QShortcut(QKeySequence("Ctrl+Shift+R"), self,
+                  context=Qt.ShortcutContext.WindowShortcut,
+                  activated=self._action_tab_reconnect)
+        QShortcut(QKeySequence("Ctrl+Shift+K"), self,
+                  context=Qt.ShortcutContext.WindowShortcut,
+                  activated=self._action_tab_disconnect)
+        QShortcut(QKeySequence("Ctrl+Shift+W"), self,
+                  context=Qt.ShortcutContext.WindowShortcut,
+                  activated=self._action_tab_close)
+
+    def _action_tab_duplicate(self):
+        """复制当前会话连接（同配置新建一个会话标签）"""
+        session = self.get_current_session()
+        if session and session.current_connection:
+            self.create_session(session.current_connection)
+        else:
+            QMessageBox.information(self, "提示", "没有可复制的连接")
+
+    def _action_tab_reconnect(self):
+        """使用当前会话的配置重新连接"""
+        session = self.get_current_session()
+        if session and session.current_connection:
+            session.connect_with_config(session.current_connection)
+        else:
+            QMessageBox.information(self, "提示", "没有可重新连接的会话")
+
+    def _action_tab_disconnect(self):
+        """断开当前会话连接"""
+        session = self.get_current_session()
+        if session and session.connection_context.is_connected():
+            session.disconnect()
+        else:
+            QMessageBox.information(self, "提示", "当前会话未建立连接")
+
+    def _action_tab_close(self):
+        """关闭当前会话连接（断开连接并关闭标签页）"""
+        session = self.get_current_session()
+        if session is None:
+            return
+        index = self.session_tabs.indexOf(session)
+        if index >= 0:
+            self.close_session(index)
+
+    def _make_themed_menu(self):
+        """创建适配当前主题的右键菜单"""
+        menu = QMenu(self)
+        if self._config_manager:
+            menu.setStyleSheet(self._config_manager.get_menu_css())
+        else:
+            bg = self._get_style('bg-tertiary', '#2d2d30')
+            color = self._get_style('text', '#ffffff')
+            border = self._get_style('border-light', '#4a4a4d')
+            selected = self._get_style('primary', '#3a8fd4')
+            menu.setStyleSheet(f"""
+                QMenu {{
+                    background-color: {bg}; color: {color};
+                    border: 1px solid {border}; padding: 4px;
+                }}
+                QMenu::item {{ padding: 6px 24px; min-width: 120px; color: {color}; }}
+                QMenu::item:selected {{ background-color: {selected}; color: #ffffff; }}
+            """)
+        return menu
+
+    def show_tab_context_menu(self, pos):
+        """会话标签页右键菜单：复制连接 / 重新连接 / 断开连接 / 关闭连接"""
+        bar = self.session_tabs.tabBar()
+        index = bar.tabAt(pos)
+        if index < 0:
+            return
+        # 欢迎页不提供会话操作
+        if self.session_tabs.widget(index) is getattr(self, 'empty_page', None):
+            return
+        # 右键先切换到被点击的标签，使后续操作作用于该会话
+        self.session_tabs.setCurrentIndex(index)
+
+        session = self.get_current_session()
+        has_conn = session is not None and bool(getattr(session, 'current_connection', None))
+        connected = session is not None and session.connection_context.is_connected()
+        self.act_tab_duplicate.setEnabled(has_conn)
+        self.act_tab_reconnect.setEnabled(has_conn)
+        self.act_tab_disconnect.setEnabled(connected)
+        self.act_tab_close.setEnabled(True)
+
+        menu = self._make_themed_menu()
+        menu.addAction(self.act_tab_duplicate)
+        menu.addAction(self.act_tab_reconnect)
+        menu.addSeparator()
+        menu.addAction(self.act_tab_disconnect)
+        menu.addAction(self.act_tab_close)
+        menu.exec(bar.mapToGlobal(pos))
+
+    # ========== 侧边栏收缩 ==========
+
+    def toggle_sidebar(self, visible):
+        """显示/隐藏左侧保存链接侧边栏"""
+        if visible:
+            self.sidebar.show()
+            self.sidebar_expand_bar.hide()
+            handle = self.splitter.handle(1)
+            if handle is not None:
+                handle.show()
+            width = self._sidebar_saved_width or 220
+            self.splitter.setSizes([width, max(200, self.right_panel.width())])
+        else:
+            # 先记住当前宽度供展开时恢复
+            sizes = self.splitter.sizes()
+            if sizes and sizes[0] > 30:
+                self._sidebar_saved_width = sizes[0]
+            self.sidebar.hide()
+            self.sidebar_expand_bar.show()
+            handle = self.splitter.handle(1)
+            if handle is not None:
+                handle.hide()
+        self._sidebar_visible = bool(visible)
+        self._save_terminal_settings()
 
     def create_session(self, conn):
         """创建新会话"""
@@ -2209,6 +3150,8 @@ class TerminalWidget(QWidget):
 
         # 同步颜色显示开关状态到新会话的ANSI解析器
         tab.ansi_parser.enable_color = getattr(self, 'color_enabled', True)
+        # 同步日志记录开关（文件在 connect_with_config 时创建）
+        tab.set_logging(getattr(self, '_log_enabled', False))
 
         # 设置初始字体大小，clamp到>0避免setPointSize(-1)警告
         safe_size = max(1, int(self.current_font_size)) if self.current_font_size and isinstance(self.current_font_size, (int, float)) else 11
@@ -2221,6 +3164,8 @@ class TerminalWidget(QWidget):
         
         index = self.session_tabs.addTab(tab, conn_name)
         self.session_tabs.setCurrentIndex(index)
+        # 自动选中新会话并将键盘焦点交给终端输入区，无需再次点击窗口
+        tab.terminal_display.setFocus()
         
         # 保存会话
         self.sessions[session_id] = {
@@ -2258,6 +3203,19 @@ class TerminalWidget(QWidget):
             # 如果没有会话了，显示欢迎页面
             if len(self.sessions) == 0:
                 self._create_empty_page()
+
+    def _on_session_tab_moved(self, from_index, to_index):
+        """连接选项卡拖动重排后的处理
+
+        欢迎页作为固定占位页始终保留在首位：若拖动导致欢迎页离开首位，
+        立即将其移回（moveTab 会再次触发本信号，届时欢迎页已在首位而结束）。
+        会话与标签的映射基于 widget 引用，位置变化不影响关闭/切换逻辑。
+        """
+        empty = getattr(self, 'empty_page', None)
+        if empty is not None:
+            empty_index = self.session_tabs.indexOf(empty)
+            if empty_index > 0:
+                self.session_tabs.tabBar().moveTab(empty_index, 0)
 
     def on_session_changed(self, index):
         """会话切换"""
@@ -2329,6 +3287,24 @@ class TerminalWidget(QWidget):
         # 防重入
         if btn_id in self._executing_workers:
             return
+        # 交互式 PTY 会话（SSH/Telnet）的命令型按钮：直接模拟手工输入注入，
+        # 保持输出轮询运行，由服务器 PTY 完整回显（提示符 + 命令 + 输出），
+        # 显示效果与逐字输入一致；不再经 worker 直读 recv（裸 \n 会导致
+        # 命令在部分 tty 下挂起、本地头信息与远端光标不同步）。
+        conn_type = (session_tab.current_connection or {}).get('type', '')
+        if btn_data.get('type') != 'script' and session_tab.interactive_mode \
+                and conn_type in ('ssh', 'telnet'):
+            session_tab.exec_button_command(btn_data.get('name', ''),
+                                            btn_data.get('command', ''))
+            # 执行中态短暂反馈（命令执行结果由终端轮询直接呈现）
+            self.button_toolbar.set_button_executing(btn_id, True)
+            QTimer.singleShot(
+                800, lambda bid=btn_id: self.button_toolbar.set_button_executing(bid, False))
+            if self._plugin_manager_ref and hasattr(self._plugin_manager_ref, 'set_tool_status'):
+                self._plugin_manager_ref.set_tool_status(
+                    'Terminal', f"按钮 {btn_data.get('name', '')}: 已执行")
+            return
+        # 脚本型 / 串口 / 非交互式：走 worker（直读响应）
         # 暂停终端输出轮询，避免与脚本/命令争抢 read_output
         session_tab.output_timer.stop()
         # 切换按钮为执行中态（蓝色）
@@ -2419,19 +3395,51 @@ class TerminalWidget(QWidget):
         if hasattr(self, 'quick_actions'):
             self.quick_actions.setStyleSheet(f"background-color: {bg_secondary};")
 
-        # 刷新保存链接标题（侧边栏中的 QLabel）
-        if hasattr(self, 'sidebar'):
-            for label in self.sidebar.findChildren(QLabel):
-                label.setStyleSheet(f"""
-                    QLabel {{
-                        background-color: {bg_tertiary};
-                        color: {text_primary};
-                        padding: 10px 8px;
-                        font-weight: bold;
-                        font-size: {font_size};
-                        border-bottom: 1px solid {border_light};
-                    }}
-                """)
+        # 刷新保存链接标题栏（标题 + 收缩按钮）
+        if hasattr(self, 'sidebar_header'):
+            self.sidebar_header.setStyleSheet(f"background-color: {bg_tertiary};")
+            self.saved_links_label.setStyleSheet(f"""
+                QLabel {{
+                    background-color: transparent;
+                    color: {text_primary};
+                    padding: 6px 0px;
+                    font-weight: bold;
+                    font-size: {font_size};
+                    border: none;
+                }}
+            """)
+            self.collapse_sidebar_btn.setStyleSheet(f"""
+                QToolButton {{
+                    background-color: transparent;
+                    color: {text_primary};
+                    border: none;
+                    font-size: {font_size};
+                }}
+                QToolButton:hover {{
+                    background-color: {bg_input};
+                    border-radius: 4px;
+                }}
+            """)
+
+        # 刷新侧边栏收缩后的恢复窄条
+        if hasattr(self, 'sidebar_expand_bar'):
+            self.sidebar_expand_bar.setStyleSheet(f"background-color: {bg_secondary};")
+            self.expand_sidebar_btn.setStyleSheet(f"""
+                QToolButton {{
+                    background-color: transparent;
+                    color: {text_primary};
+                    border: none;
+                    font-size: {font_size};
+                }}
+                QToolButton:hover {{
+                    background-color: {bg_input};
+                    border-radius: 4px;
+                }}
+            """)
+
+        # 刷新快速连接栏样式
+        if hasattr(self, 'quick_bar'):
+            self.quick_bar.setStyleSheet(self._quick_bar_qss())
 
         # 刷新右侧面板背景
         if hasattr(self, 'right_panel'):
@@ -2445,7 +3453,12 @@ class TerminalWidget(QWidget):
             text_secondary = self._get_style('text-secondary', '#cccccc')
             font_size_lg = self._get_font_size('size-xl', '14px')
             font_size_md = self._get_font_size('size-md', '12px')
+            shortcut_panel = getattr(self, 'welcome_shortcut_panel', None)
             for label in self.empty_page.findChildren(QLabel):
+                # 快捷键面板内部标签由面板统一样式管理，跳过通用刷新
+                if shortcut_panel is not None and label.parent() is not None \
+                        and label.isWidgetType() and shortcut_panel.isAncestorOf(label):
+                    continue
                 if '欢迎' in label.text():
                     label.setStyleSheet(f"""
                         QLabel {{
@@ -2462,66 +3475,23 @@ class TerminalWidget(QWidget):
                             margin-top: 10px;
                         }}
                     """)
+            # 快捷键面板按新主题整体刷新
+            if shortcut_panel is not None:
+                self._style_welcome_shortcut_panel(shortcut_panel)
 
         # 重新应用侧边栏按钮样式
         if hasattr(self, 'new_conn_btn'):
             btn_css = self._get_button_css('button')
             self.new_conn_btn.setStyleSheet(btn_css)
-            self.reconnect_btn.setStyleSheet(btn_css)
             self.sftp_btn.setStyleSheet(btn_css)
-            self.copy_conn_btn.setStyleSheet(btn_css)
 
         # 刷新连接列表样式
         if hasattr(self, 'connection_list'):
-            self.connection_list.setStyleSheet(f"""
-                QListWidget {{
-                    background-color: {bg_main};
-                    color: {text_primary};
-                    border: none;
-                }}
-                QListWidget::item {{
-                    padding: 3px 8px;
-                    border-bottom: 1px solid {border};
-                    font-size: {font_size_normal};
-                }}
-                QListWidget::item:selected {{
-                    background-color: {selected_bg};
-                    color: {selected_text};
-                }}
-                QListWidget::item:hover {{
-                    background-color: {bg_tertiary};
-                }}
-            """)
+            self.connection_list.setStyleSheet(self._connection_list_qss())
 
         # 刷新会话标签页样式
         if hasattr(self, 'session_tabs'):
-            self.session_tabs.setStyleSheet(f"""
-                QTabWidget::pane {{
-                    border: 1px solid {border};
-                    background-color: {bg_main};
-                }}
-                QTabBar::tab {{
-                    background-color: {bg_tertiary};
-                    color: {text_secondary};
-                    padding: 5px 12px;
-                    border: 1px solid {border};
-                    border-bottom: none;
-                    margin-right: 1px;
-                    border-top-left-radius: 4px;
-                    border-top-right-radius: 4px;
-                    font-size: {font_size_sm};
-                }}
-                QTabBar::tab:selected {{
-                    background-color: {selected_bg};
-                    color: {selected_text};
-                    border-color: {selected_bg};
-                    font-weight: bold;
-                }}
-                QTabBar::tab:hover:!selected {{
-                    background-color: {bg_input};
-                    color: {text_primary};
-                }}
-            """)
+            self.session_tabs.setStyleSheet(self._tab_bar_qss())
 
         # 刷新SessionTab内部样式
         new_scheme = self._get_color_scheme()
@@ -2540,9 +3510,12 @@ class TerminalWidget(QWidget):
             self.button_toolbar.refresh_theme_styles()
 
     def load_connections(self):
-        """加载连接列表"""
+        """加载连接列表（默认按连接名称不区分大小写排序）"""
         self.connection_list.clear()
-        connections = self.connection_manager.get_connections()
+        connections = sorted(
+            self.connection_manager.get_connections(),
+            key=lambda c: str(c.get('name', '')).lower()
+        )
 
         type_icons = {
             "ssh": "SSH",
@@ -2597,28 +3570,6 @@ class TerminalWidget(QWidget):
         
         dialog = SFTPDialog(session.connection_context, self, config_manager=self._config_manager)
         dialog.exec()
-
-    def reconnect_last(self):
-        """重新连接上一个会话"""
-        session = self.get_current_session()
-        if session and session.current_connection:
-            session.connect_with_config(session.current_connection)
-        else:
-            QMessageBox.information(self, "提示", "没有可重新连接的会话")
-
-    def copy_current_connection(self):
-        """复制当前连接，在主窗体中创建新的会话标签页（使用相同连接配置重新连接）"""
-        session = self.get_current_session()
-        if not session or not session.current_connection:
-            QMessageBox.information(self, "提示", "没有可复制的连接")
-            return
-
-        conn = session.current_connection
-        # 使用相同连接配置创建新的会话标签页并建立连接
-        self.create_session(conn)
-        # 通过框架统一状态接口上报结果
-        if self._plugin_manager_ref and hasattr(self._plugin_manager_ref, 'set_tool_status'):
-            self._plugin_manager_ref.set_tool_status('Terminal', f"已复制连接: {conn.get('name', '连接')}")
 
     def show_font_size_menu(self):
         """显示字体大小设置菜单"""

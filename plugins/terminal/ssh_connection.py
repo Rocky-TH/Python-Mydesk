@@ -69,9 +69,12 @@ class SSHConnection(ConnectionBase):
                 
                 self.transport = self.client.get_transport()
                 if self.transport:
-                    self.transport.open_channel("session")
                     self.shell = self.transport.open_session()
-                    self.shell.get_pty(width=80, height=24)
+                    # 请求 PTY 时必须显式声明终端类型：paramiko 默认 term='vt100'，
+                    # 真实 Ubuntu/OpenSSH 环境下 vt100 terminfo 缺少 khome/kend/kich1
+                    # 等按键定义且显示能力受限，会导致 HOME/END 失效、行编辑回显异常。
+                    # xterm-256color 是 Debian/Ubuntu 等主流发行版的标配。
+                    self.shell.get_pty(term='xterm-256color', width=80, height=24)
                     self.shell.invoke_shell()
                     self.connected = True
                     result[0] = True
@@ -150,6 +153,54 @@ class SSHConnection(ConnectionBase):
             except Exception as e:
                 print(f"发送数据失败: {e}")
                 pass
+
+    def enable_keepalive(self, interval=30):
+        """开启 SSH 保活：按间隔发送 SSH global request（keepalive@），
+        防止 NAT/防火墙因长时间无流量而断开空闲连接。
+
+        同时尽量打开底层 TCP socket 的 SO_KEEPALIVE。
+        """
+        interval = max(5, int(interval))
+        try:
+            if self.transport and self.transport.is_active():
+                # paramiko 内部定时器，到期在传输线程发送 keepalive 包
+                self.transport.set_keepalive(interval)
+        except Exception:
+            pass
+        try:
+            sock = getattr(self.transport, 'sock', None) if self.transport else None
+            raw = getattr(sock, 'socket', None) or sock
+            if raw is not None and hasattr(raw, 'setsockopt'):
+                import socket as _socket
+                raw.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+                if hasattr(_socket, 'TCP_KEEPIDLE'):
+                    raw.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, interval)
+                if hasattr(_socket, 'TCP_KEEPINTVL'):
+                    raw.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL,
+                                   max(1, interval // 3))
+        except Exception:
+            pass
+
+    def get_endpoints(self):
+        """返回 (本地地址, 远程地址) 字符串元组，供连接成功 banner 展示。
+
+        直连场景从 paramiko transport 底层 socket 读取；
+        代理等包装场景可能取不到，返回空字符串由上层回退。
+        """
+        local, remote = "", ""
+        try:
+            sock = getattr(self.transport, 'sock', None) if self.transport else None
+            raw = getattr(sock, 'socket', None) or sock
+            if raw is not None and hasattr(raw, 'getsockname'):
+                laddr = raw.getsockname()
+                raddr = raw.getpeername()
+                if isinstance(laddr, tuple) and len(laddr) >= 2:
+                    local = f"{laddr[0]}:{laddr[1]}"
+                if isinstance(raddr, tuple) and len(raddr) >= 2:
+                    remote = f"{raddr[0]}:{raddr[1]}"
+        except Exception:
+            pass
+        return local, remote
 
     def resize_pty(self, width=80, height=24):
         """动态调整PTY终端大小，使远程shell感知终端实际宽度
