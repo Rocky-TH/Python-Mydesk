@@ -128,11 +128,11 @@ class MainWindow(QMainWindow):
             QTabBar::tab {{
                 background-color: {bg_tertiary};
                 color: {text_secondary};
-                padding: 6px 18px;
+                padding: 3px 18px;
                 border: 1px solid {border};
                 border-bottom: none;
                 margin-right: 2px;
-                margin-top: 2px;
+                margin-top: 1px;
                 border-top-left-radius: {border_radius_normal};
                 border-top-right-radius: {border_radius_normal};
                 font-size: {font_size_medium};
@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
             QMenuBar {{
                 background-color: {bg_tertiary};
                 color: {text_primary};
-                border-bottom: 1px solid {border};
+                border-bottom: 1px solid {border_light};
                 padding: 2px;
             }}
             QMenuBar::item:selected {{
@@ -260,6 +260,12 @@ class MainWindow(QMainWindow):
         help_menu.addAction(license_action)
 
         self._menu_bar_created = True
+
+        # 工具标签栏（加载在菜单栏后）高度与菜单栏保持一致，中间以边框分隔线隔开
+        if hasattr(self, 'plugin_tabs'):
+            menu_bar_height = menubar.sizeHint().height()
+            if menu_bar_height > 0:
+                self.plugin_tabs.tabBar().setFixedHeight(menu_bar_height)
 
     def _build_plugin_menus(self, menubar):
         """构建插件注册的菜单。
@@ -352,8 +358,9 @@ class MainWindow(QMainWindow):
             QToolBar {{
                 background-color: {bg_tertiary};
                 border: none;
+                border-top: 1px solid {border_light};
                 spacing: 6px;
-                padding: 4px;
+                padding: 2px 8px;
             }}
             QToolBar::separator {{
                 background-color: {border_light};
@@ -364,7 +371,7 @@ class MainWindow(QMainWindow):
                 background-color: transparent;
                 border: 1px solid transparent;
                 border-radius: {border_radius_small};
-                padding: 6px 12px;
+                padding: 3px 10px;
                 color: {text_primary};
                 font-size: {font_size_normal};
             }}
@@ -379,6 +386,13 @@ class MainWindow(QMainWindow):
         """)
         self.addToolBar(self.toolbar)
         self._tool_bar_created = True
+
+        # 工具栏高度与菜单栏保持一致，形成紧凑统一的顶部区域
+        menubar = self.menuBar()
+        if menubar is not None:
+            menu_bar_height = menubar.sizeHint().height()
+            if menu_bar_height > 0:
+                self.toolbar.setFixedHeight(menu_bar_height)
 
     def build_plugin_actions(self):
         """根据插件配置文件动态构建菜单和工具栏"""
@@ -656,11 +670,11 @@ class MainWindow(QMainWindow):
             QTabBar::tab {{
                 background-color: {bg_tertiary};
                 color: {text_secondary};
-                padding: 6px 18px;
+                padding: 3px 18px;
                 border: 1px solid {border};
                 border-bottom: none;
                 margin-right: 2px;
-                margin-top: 2px;
+                margin-top: 1px;
                 border-top-left-radius: {border_radius_normal};
                 border-top-right-radius: {border_radius_normal};
                 font-size: {font_size_medium};

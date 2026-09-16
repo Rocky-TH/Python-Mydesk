@@ -519,10 +519,12 @@ class ProtocolToolWidget(QWidget):
         send_layout = QVBoxLayout(send_widget)
         send_layout.setContentsMargins(0, 0, 0, 0)
         send_layout.setSpacing(2)
-        send_layout.addLayout(self._create_send_toolbar())
+        # 先创建发送文本框，再创建工具栏：工具栏默认勾选 Hex发送 会立即触发
+        # _on_send_hex_toggled 访问 send_text，必须保证控件已存在
         self.send_text = HexPlainTextEdit()
         self.send_text.setStyleSheet(self._get_plain_text_edit_style(read_only=False))
         self.send_text.setPlaceholderText("输入要发送的内容（字符串或十六进制，如 01 03 00 01）...")
+        send_layout.addLayout(self._create_send_toolbar())
         send_layout.addWidget(self.send_text)
         splitter.addWidget(send_widget)
 

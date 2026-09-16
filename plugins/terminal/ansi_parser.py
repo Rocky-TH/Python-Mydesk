@@ -21,24 +21,24 @@ class ANSIParser:
     # ANSI颜色代码映射（使用缓存）
     _color_cache = {}
 
-    # 深色主题ANSI颜色代码映射（浅色文字在深色背景上可见）
+    # 深色主题ANSI颜色代码映射（Tabby Material 色板，柔和友好的高可读配色）
     COLOR_MAP_DARK = {
         30: QColor(0, 0, 0),           # 黑色
-        31: QColor(205, 0, 0),         # 红色
-        32: QColor(0, 205, 0),         # 绿色
-        33: QColor(205, 205, 0),       # 黄色
-        34: QColor(0, 0, 238),         # 蓝色
-        35: QColor(205, 0, 205),       # 品红
-        36: QColor(0, 205, 205),       # 青色
-        37: QColor(229, 229, 229),     # 白色
-        90: QColor(102, 102, 102),     # 亮黑（灰色）
-        91: QColor(255, 85, 85),       # 亮红
-        92: QColor(85, 255, 85),       # 亮绿
-        93: QColor(255, 255, 85),      # 亮黄
-        94: QColor(85, 85, 255),       # 亮蓝
-        95: QColor(255, 85, 255),      # 亮品红
-        96: QColor(85, 255, 255),      # 亮青
-        97: QColor(255, 255, 255),     # 亮白
+        31: QColor(0xFF, 0x53, 0x70),  # 红色 #ff5370
+        32: QColor(0xC3, 0xE8, 0x8D),  # 绿色 #c3e88d
+        33: QColor(0xFF, 0xCB, 0x6B),  # 黄色 #ffcb6b
+        34: QColor(0x82, 0xAA, 0xFF),  # 蓝色 #82aaff
+        35: QColor(0xC7, 0x92, 0xEA),  # 品红 #c792ea
+        36: QColor(0x89, 0xDD, 0xFF),  # 青色 #89ddff
+        37: QColor(0xEC, 0xEF, 0xF1),  # 白色 #eceff1
+        90: QColor(0x54, 0x6E, 0x7A),  # 亮黑（灰蓝） #546e7a
+        91: QColor(0xFF, 0x53, 0x70),  # 亮红 #ff5370
+        92: QColor(0xC3, 0xE8, 0x8D),  # 亮绿 #c3e88d
+        93: QColor(0xFF, 0xCB, 0x6B),  # 亮黄 #ffcb6b
+        94: QColor(0x82, 0xAA, 0xFF),  # 亮蓝 #82aaff
+        95: QColor(0xC7, 0x92, 0xEA),  # 亮品红 #c792ea
+        96: QColor(0x89, 0xDD, 0xFF),  # 亮青 #89ddff
+        97: QColor(0xFF, 0xFF, 0xFF),  # 亮白 #ffffff
     }
 
     # 浅色主题ANSI颜色代码映射（加深浅色文字，使其在浅色背景上可见）
@@ -62,24 +62,24 @@ class ANSIParser:
         97: QColor(30, 30, 30),        # 亮白→近黑色（关键：浅色背景上可见）
     }
 
-    # 深色主题背景色代码映射
+    # 深色主题背景色代码映射（Tabby Material 色板，与前景色一致）
     BG_COLOR_MAP_DARK = {
         40: QColor(0, 0, 0),           # 黑色背景
-        41: QColor(205, 0, 0),         # 红色背景
-        42: QColor(0, 205, 0),         # 绿色背景
-        43: QColor(205, 205, 0),       # 黄色背景
-        44: QColor(0, 0, 238),         # 蓝色背景
-        45: QColor(205, 0, 205),       # 品红背景
-        46: QColor(0, 205, 205),       # 青色背景
-        47: QColor(229, 229, 229),     # 白色背景
-        100: QColor(102, 102, 102),    # 亮黑背景
-        101: QColor(255, 85, 85),      # 亮红背景
-        102: QColor(85, 255, 85),      # 亮绿背景
-        103: QColor(255, 255, 85),     # 亮黄背景
-        104: QColor(85, 85, 255),      # 亮蓝背景
-        105: QColor(255, 85, 255),     # 亮品红背景
-        106: QColor(85, 255, 255),     # 亮青背景
-        107: QColor(255, 255, 255),    # 亮白背景
+        41: QColor(0xFF, 0x53, 0x70),  # 红色背景 #ff5370
+        42: QColor(0xC3, 0xE8, 0x8D),  # 绿色背景 #c3e88d
+        43: QColor(0xFF, 0xCB, 0x6B),  # 黄色背景 #ffcb6b
+        44: QColor(0x82, 0xAA, 0xFF),  # 蓝色背景 #82aaff
+        45: QColor(0xC7, 0x92, 0xEA),  # 品红背景 #c792ea
+        46: QColor(0x89, 0xDD, 0xFF),  # 青色背景 #89ddff
+        47: QColor(0xEC, 0xEF, 0xF1),  # 白色背景 #eceff1
+        100: QColor(0x54, 0x6E, 0x7A),  # 亮黑背景 #546e7a
+        101: QColor(0xFF, 0x53, 0x70),  # 亮红背景 #ff5370
+        102: QColor(0xC3, 0xE8, 0x8D),  # 亮绿背景 #c3e88d
+        103: QColor(0xFF, 0xCB, 0x6B),  # 亮黄背景 #ffcb6b
+        104: QColor(0x82, 0xAA, 0xFF),  # 亮蓝背景 #82aaff
+        105: QColor(0xC7, 0x92, 0xEA),  # 亮品红背景 #c792ea
+        106: QColor(0x89, 0xDD, 0xFF),  # 亮青背景 #89ddff
+        107: QColor(0xFF, 0xFF, 0xFF),  # 亮白背景 #ffffff
     }
 
     # 浅色主题背景色代码映射（黑色背景反转为浅色，白色背景保持）

@@ -47,6 +47,9 @@ class CalcToolWidget(QWidget):
         self.config = config or {}
         self._config_manager = config_manager
         self._plugin_manager = plugin_manager
+        # 程序员模式：位宽（8/16/32/64 = 字节/字/双字/四字）与十进制符号方式
+        self._prog_bit_width = 32
+        self._prog_signed = False
         self.init_ui()
         # 启用键盘输入：设置焦点策略，使计算工具面板可接收键盘事件
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -359,6 +362,8 @@ class CalcToolWidget(QWidget):
         # 保存需要刷新样式的控件引用
         self._style_widgets = {
             'calc_mode_combo': self.calc_mode_combo,
+            'prog_width_combo': self.prog_width_combo,
+            'prog_sign_combo': self.prog_sign_combo,
             'calc_display': self.calc_display,
             'calc_expression_display': self.calc_expression_display,
             'dec_input': self.dec_input,
@@ -379,8 +384,9 @@ class CalcToolWidget(QWidget):
         for widget in self.findChildren(QGroupBox):
             widget.setStyleSheet(self._get_group_box_style())
         # 刷新ComboBox
-        if 'calc_mode_combo' in self._style_widgets:
-            self._style_widgets['calc_mode_combo'].setStyleSheet(self._get_combo_box_style())
+        for key in ['calc_mode_combo', 'prog_width_combo', 'prog_sign_combo']:
+            if key in self._style_widgets:
+                self._style_widgets[key].setStyleSheet(self._get_combo_box_style())
         # 刷新LineEdit（普通输入框）
         line_edit_style = self._get_line_edit_style()
         for key in ['dec_input', 'bin_input', 'hex_input', 'hex_array_input', 'string_input']:
@@ -533,7 +539,42 @@ class CalcToolWidget(QWidget):
         layout.addWidget(display_container)
 
         self.programmer_display = QWidget()
-        prog_layout = QFormLayout(self.programmer_display)
+        prog_outer = QVBoxLayout(self.programmer_display)
+        prog_outer.setSpacing(4)
+        prog_outer.setContentsMargins(0, 0, 0, 0)
+
+        # 位宽（字节/字/双字/四字）+ 十进制符号方式（无符号/有符号）设置行
+        prog_setting_layout = QHBoxLayout()
+        prog_setting_layout.setSpacing(6)
+        prog_setting_layout.setContentsMargins(0, 0, 0, 0)
+
+        prog_width_label = QLabel("位宽:")
+        prog_width_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size};")
+        prog_width_label.setFixedWidth(48)
+        prog_width_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.prog_width_combo = QComboBox()
+        self.prog_width_combo.addItems(["字节 (8位)", "字 (16位)", "双字 (32位)", "四字 (64位)"])
+        self.prog_width_combo.setCurrentIndex(2)  # 默认双字 32 位
+        self.prog_width_combo.setStyleSheet(self._get_combo_box_style())
+        self.prog_width_combo.currentIndexChanged.connect(self._on_prog_width_changed)
+
+        prog_sign_label = QLabel("十进制:")
+        prog_sign_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size};")
+        prog_sign_label.setFixedWidth(48)
+        prog_sign_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.prog_sign_combo = QComboBox()
+        self.prog_sign_combo.addItems(["无符号", "有符号"])
+        self.prog_sign_combo.setCurrentIndex(0)
+        self.prog_sign_combo.setStyleSheet(self._get_combo_box_style())
+        self.prog_sign_combo.currentIndexChanged.connect(self._on_prog_sign_changed)
+
+        prog_setting_layout.addWidget(prog_width_label)
+        prog_setting_layout.addWidget(self.prog_width_combo, 1)
+        prog_setting_layout.addWidget(prog_sign_label)
+        prog_setting_layout.addWidget(self.prog_sign_combo, 1)
+        prog_outer.addLayout(prog_setting_layout)
+
+        prog_layout = QFormLayout()
         prog_layout.setSpacing(4)
         prog_layout.setContentsMargins(0, 0, 0, 0)
         prog_layout.setLabelAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -567,6 +608,7 @@ class CalcToolWidget(QWidget):
         self.prog_hex_value.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.prog_hex_value.setStyleSheet(self._get_line_edit_style(read_only=True))
         prog_layout.addRow(self.prog_hex_label, self.prog_hex_value)
+        prog_outer.addLayout(prog_layout)
 
         self.programmer_display.hide()
         layout.addWidget(self.programmer_display)
@@ -873,6 +915,11 @@ class CalcToolWidget(QWidget):
             if self.calc_mode_combo.currentIndex() == 1:
                 op1 = int(op1)
                 op2 = int(op2)
+                # 有符号模式：先把补码表示还原为有符号整数再运算，
+                # 保证除法/取模/右移等语义符合有符号数；结果统一按位宽截断
+                if self._prog_signed:
+                    op1 = self._prog_signed_value(self._prog_mask(op1))
+                    op2 = self._prog_signed_value(self._prog_mask(op2))
                 if op == "+":
                     result = op1 + op2
                 elif op == "-":
@@ -884,7 +931,8 @@ class CalcToolWidget(QWidget):
                         self.calc_display.setText("错误: 除零")
                         self.calc_expression_display.setText(full_expression)
                         return
-                    result = op1 // op2
+                    # 有符号模式截断取整（向零），无符号模式为整除
+                    result = int(op1 / op2) if self._prog_signed else op1 // op2
                 elif op == "%":
                     if op2 == 0:
                         self.calc_display.setText("错误: 除零")
@@ -903,6 +951,8 @@ class CalcToolWidget(QWidget):
                     result = op1 ^ op2
                 else:
                     result = op1
+                # 运算结果按当前位宽回绕截断（模拟硬件溢出）
+                result = self._prog_mask(result)
             else:
                 if op == "+":
                     result = op1 + op2
@@ -922,7 +972,11 @@ class CalcToolWidget(QWidget):
                     result = op1
 
             self.calc_expression_display.setText(full_expression)
-            self.calc_display.setText(str(result))
+            if self.calc_mode_combo.currentIndex() == 1:
+                # 主显示与十进制结果框保持一致（有符号模式显示补码对应的负数）
+                self.calc_display.setText(str(self._prog_display_decimal(result)))
+            else:
+                self.calc_display.setText(str(result))
             self._calc_operand1 = None
             self._calc_operator = None
             self._calc_waiting_for_operand2 = True
@@ -937,8 +991,10 @@ class CalcToolWidget(QWidget):
             try:
                 val = self._calc_parse_number(current)
                 if self.calc_mode_combo.currentIndex() == 1:
-                    self.calc_display.setText(str(-int(val)))
-                    self._update_programmer_display(-int(val))
+                    # 补码取负并按位宽截断；主显示跟随当前符号方式
+                    negated = self._prog_mask(-int(val))
+                    self.calc_display.setText(str(self._prog_display_decimal(negated)))
+                    self._update_programmer_display(negated)
                 else:
                     self.calc_display.setText(str(-val))
                     self._update_programmer_display(-val)
@@ -1011,16 +1067,40 @@ class CalcToolWidget(QWidget):
         except (ValueError, TypeError):
             pass
 
+    def _prog_mask(self, value):
+        """将值按当前程序员模式位宽截断为无符号整数（模拟硬件位宽回绕）
+
+        字节=8 位(0~255)、字=16 位、双字=32 位、四字=64 位。
+        """
+        return int(value) & ((1 << self._prog_bit_width) - 1)
+
+    def _prog_signed_value(self, masked_value):
+        """把已按位宽截断的无符号值按补码解释为有符号整数"""
+        value = int(masked_value)
+        sign_bit = 1 << (self._prog_bit_width - 1)
+        if value & sign_bit:
+            return value - (1 << self._prog_bit_width)
+        return value
+
+    def _prog_display_decimal(self, masked_value):
+        """按当前符号方式返回十进制显示值（有符号=补码解释，无符号=原值）"""
+        if self._prog_signed:
+            return self._prog_signed_value(masked_value)
+        return int(masked_value)
+
     def _calc_parse_number(self, text):
         try:
             if self.calc_mode_combo.currentIndex() == 1:
                 text = text.strip()
                 if text.startswith("0x"):
-                    return int(text, 16)
+                    value = int(text, 16)
                 elif any(c in text.upper() for c in "ABCDEF"):
-                    return int(text, 16)
+                    value = int(text, 16)
                 else:
-                    return int(text)
+                    value = int(text)
+                # 程序员模式：输入统一按当前位宽截断（单点归一化），
+                # 后续运算/显示均基于该机器表示
+                return self._prog_mask(value)
             else:
                 if "." in text:
                     return float(text)
@@ -1033,13 +1113,67 @@ class CalcToolWidget(QWidget):
         if self.calc_mode_combo.currentIndex() == 1 and self.programmer_display.isVisible():
             try:
                 int_val = int(value)
-                self.prog_dec_value.setText(str(int_val))
-                self.prog_bin_value.setText("0b" + bin(int_val)[2:])
-                self.prog_hex_value.setText("0x" + hex(int_val).upper()[2:])
+            except (ValueError, OverflowError, TypeError):
+                self.prog_dec_value.setText(str(value))
+                self.prog_bin_value.setText("错误")
+                self.prog_hex_value.setText("错误")
+                return
+            try:
+                # 统一归一化到当前位宽
+                masked = self._prog_mask(int_val)
+                bits = self._prog_bit_width
+
+                # 十进制：按有符号（补码）/无符号显示
+                self.prog_dec_value.setText(str(self._prog_display_decimal(masked)))
+
+                # 二进制：补齐到位宽，每 4 位一组便于阅读
+                bits_str = format(masked, f'0{bits}b')
+                groups = [bits_str[max(0, i - 4):i]
+                          for i in range(len(bits_str), 0, -4)][::-1]
+                self.prog_bin_value.setText("0b " + " ".join(groups))
+
+                # 十六进制：补齐到位宽对应位数，每字节(2位)一组
+                hex_digits = bits // 4
+                hex_str = format(masked, f'0{hex_digits}X')
+                hex_groups = [hex_str[max(0, i - 2):i]
+                              for i in range(len(hex_str), 0, -2)][::-1]
+                self.prog_hex_value.setText("0x " + " ".join(hex_groups))
             except (ValueError, OverflowError):
                 self.prog_dec_value.setText(str(value))
                 self.prog_bin_value.setText("错误")
                 self.prog_hex_value.setText("错误")
+
+    def _refresh_programmer_from_display(self):
+        """位宽/符号方式切换后：按新设置重新归一化当前显示并刷新结果区"""
+        if self.calc_mode_combo.currentIndex() != 1:
+            return
+        text = self.calc_display.text().strip()
+        if not text or text.startswith("错误"):
+            return
+        try:
+            value = self._prog_mask(int(text))
+        except ValueError:
+            # 含 A-F 的十六进制输入等
+            try:
+                value = self._prog_mask(int(text, 16))
+            except ValueError:
+                return
+        # 主显示同步为当前符号方式下的十进制值（位宽截断即时生效）
+        self.calc_display.setText(str(self._prog_display_decimal(value)))
+        self._update_programmer_display(value)
+
+    def _on_prog_width_changed(self, index):
+        """位宽切换：字节(8)/字(16)/双字(32)/四字(64)"""
+        self._prog_bit_width = [8, 16, 32, 64][index]
+        self._refresh_programmer_from_display()
+        # 选择后把焦点还给面板，保证键盘输入继续有效
+        self.setFocus()
+
+    def _on_prog_sign_changed(self, index):
+        """十进制符号方式切换：0=无符号 1=有符号（补码）"""
+        self._prog_signed = (index == 1)
+        self._refresh_programmer_from_display()
+        self.setFocus()
 
     def _create_number_convert_panel(self):
         group = QGroupBox("数制转换 (十进制/二进制/十六进制)")
