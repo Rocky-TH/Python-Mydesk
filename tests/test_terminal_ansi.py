@@ -165,10 +165,14 @@ check('3.3 无 _local_echo_sent', '_local_echo_sent' not in src, '不应有本�
 print('\n========== 4. _insert_text_with_cr ANSI 处理验证 ==========')
 
 src_insert = inspect.getsource(tab._insert_text_with_cr)
-check('4.1 _insert_text_with_cr 支持 OSC 序列', "']'" in src_insert, '应处理 ] 序列')
-check('4.2 _insert_text_with_cr 支持 CSI 问号参数', "'?'" in src_insert or '?<>' in src_insert,
-      '应支持问号参数')
-check('4.3 _insert_text_with_cr 支持 SS3 序列', "'O'" in src_insert, '应处理 SS3 序列')
+# 转义序列扫描已提取到 _scan_escape_seq，_insert_text_with_cr 委托其处理
+src_scan = inspect.getsource(tab._scan_escape_seq)
+check('4.1 _insert_text_with_cr 支持 OSC 序列',
+      '_scan_escape_seq' in src_insert and "']'" in src_scan, '应处理 ] 序列')
+check('4.2 _insert_text_with_cr 支持 CSI 问号参数',
+      "'\\x3f'" in src_scan or '?<>' in src_scan,
+      '应支持问号参数（CSI 参数范围覆盖 0x3F ?）')
+check('4.3 _insert_text_with_cr 支持 SS3 序列', "'O'" in src_scan, '应处理 SS3 序列')
 
 # ===== 5. 旧版 bug 场景验证 =====
 print('\n========== 5. 旧版 bug 场景验证 ==========')

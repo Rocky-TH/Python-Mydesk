@@ -61,7 +61,8 @@ check('2.3 无生硬边框（border: none）',
 check('2.4 标签栏透明浮起（QTabBar background: transparent）',
       'QTabBar {' in qss_src and 'transparent' in qss_src)
 check('2.5 选中态与悬停态颜色区分（独立选中色）',
-      "tab_sel_bg" in qss_src and "'#454545'" in qss_src)
+      "tab_sel_bg" in qss_src and "_blend_hex" in qss_src
+      and "hover:!selected" in qss_src)
 
 src_refresh = inspect.getsource(tw.TerminalWidget.refresh_theme_styles)
 check('2.6 主题切换时复用 _tab_bar_qss',

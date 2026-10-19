@@ -863,7 +863,18 @@ class SessionTab(QWidget):
         else:
             doc = cursor.document()
             if doc.lastBlock().blockNumber() != cursor.block().blockNumber():
-                cursor.movePosition(QTextCursor.MoveOperation.End)
+                # 清屏（ESC[2J）预置的空白新屏幕：光标之后全部为空白行时
+                # 保持光标位置，让提示符从屏幕顶部开始打印（xterm 清屏行为）；
+                # 否则跳到文档末尾，避免把输出插入到历史文本中间。
+                b = cursor.block().next()
+                trailing_blank = True
+                while b.isValid():
+                    if b.text():
+                        trailing_blank = False
+                        break
+                    b = b.next()
+                if not trailing_blank:
+                    cursor.movePosition(QTextCursor.MoveOperation.End)
 
         # 先处理回车符 \r\n -> \n, 然后处理单独的 \r
         text = text.replace('\r\n', '\n')
@@ -981,10 +992,56 @@ class SessionTab(QWidget):
         else:
             cursor.insertText(ch)
 
+    def _get_screen_cols(self):
+        """当前终端屏幕列数（取最近一次 PTY 尺寸测量结果）"""
+        prev = getattr(self, '_last_pty_size', None)
+        if prev and len(prev) == 2:
+            return max(20, int(prev[0]))
+        return 80
+
+    def _terminal_wrap_line(self, cursor):
+        """自动换行（DECAWM）：可打印字符写满右边距后，后续字符移到下一行行首
+
+        真实终端的硬换行语义：长命令回显、vim 长行绘制都依赖此行为；
+        缺失会导致行内容溢出单行，readline 按行移动光标、vim 按行号
+        定位（CUP）时全部错位。
+        """
+        MOVE = QTextCursor.MoveOperation
+        if self._alt_screen_active:
+            self._alt_line_feed(cursor, reset_col=True)
+        elif cursor.block().next().isValid():
+            # 消耗清屏预置的空白行（与主屏 \n 处理一致）
+            cursor.movePosition(MOVE.Down)
+            cursor.movePosition(MOVE.StartOfLine)
+        else:
+            cursor.movePosition(MOVE.EndOfLine)
+            cursor.insertText('\n')
+
+    def _write_printable_run(self, cursor, run):
+        """按终端语义写入一段可打印字符：行中覆盖、行尾追加、写满右边距自动换行"""
+        cols = self._get_screen_cols()
+        i = 0
+        n = len(run)
+        while i < n:
+            col = cursor.position() - cursor.block().position()
+            if col >= cols:
+                self._terminal_wrap_line(cursor)
+                continue
+            take = min(n - i, cols - col)
+            seg = run[i:i + take]
+            block = cursor.block()
+            block_end = block.position() + block.length() - 1
+            if cursor.position() >= block_end:
+                cursor.insertText(seg)  # 行尾：批量追加（快速路径）
+            else:
+                for ch in seg:
+                    self._terminal_write_char(cursor, ch)
+            i += take
+
     def _insert_text_with_cr(self, cursor, text):
         """插入文本，按终端语义处理控制字符
 
-        - \\r (CR)：回到行首并清空当前行内容（readline 重绘输入行的标准动作）
+        - \\r (CR)：回到行首，保留行内容（xterm 语义；清行由显式 ESC[K 表达）
         - \\b (BS)：光标左移一格，不删除内容（删除由随后的"空格覆盖"或
           \\x1b[P 等序列表达）；不能跨出当前文本块
         - \\x07 (BEL) / \\x0e / \\x0f：无显示效果，忽略
@@ -992,18 +1049,10 @@ class SessionTab(QWidget):
         - \\x1b...：ANSI 光标/编辑序列，交由 _apply_cursor_sequence 执行
         - 可打印字符：行尾批量追加（快速路径），行中逐字覆盖
         """
-        control_chars = '\r\b\x7f\t\x1b' + self._IGNORE_CHARS
-        # 备用屏幕（vi/less）下 \n 需要按终端"下移一行+滚动"语义处理，
-        # 不能走 QTextEdit 默认插入段落（会使屏幕行数无限增长）
-        if self._alt_screen_active:
-            control_chars += '\n'
+        control_chars = '\r\b\x7f\t\x1b\n' + self._IGNORE_CHARS
         if not any(c in text for c in control_chars):
-            # 纯文本快速路径：文档末尾直接批量追加；行中逐字覆盖
-            if cursor.atEnd():
-                cursor.insertText(text)
-            else:
-                for ch in text:
-                    self._terminal_write_char(cursor, ch)
+            # 纯文本路径：行尾批量追加、行中逐字覆盖、写满右边距自动换行
+            self._write_printable_run(cursor, text)
             return
 
         i = 0
@@ -1011,19 +1060,25 @@ class SessionTab(QWidget):
         while i < n:
             ch = text[i]
             if ch == '\r':
-                if self._alt_screen_active:
-                    # 全屏程序：CR 仅回到行首，保留行内容（后续字符按覆盖语义重写）
-                    cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-                else:
-                    # 回到行首并清空整行（readline 重绘：先 CR 再重印提示符+输入行）
-                    cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
-                    cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
-                    cursor.removeSelectedText()
+                # CR：仅回到行首（xterm 语义），行内容保留，后续字符按覆盖语义重写；
+                # 清行由服务器发送的显式 ESC[K 序列表达。
+                # （普通模式此前会清空整行：Home/End 移动光标时 readline 只发
+                #   \r 不重现整行，导致光标后内容被抹掉、历史上下翻页错乱）
+                cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
                 i += 1
             elif ch == '\n':
-                # 仅备用屏幕会走到这里（普通模式下 \n 走可打印字符快速/批量路径）
                 # 服务器输出均为 ONLCR 的 \r\n，渲染前已折叠为单个 \n，故回到行首
-                self._alt_line_feed(cursor, reset_col=True)
+                if self._alt_screen_active:
+                    self._alt_line_feed(cursor, reset_col=True)
+                else:
+                    # 主屏：优先消耗下方已有的空白行（清屏预置的空白屏幕），
+                    # 避免清屏后每次换行都新增文本块导致空白屏幕无限增长
+                    if cursor.block().next().isValid():
+                        cursor.movePosition(QTextCursor.MoveOperation.Down)
+                        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+                    else:
+                        cursor.movePosition(QTextCursor.MoveOperation.EndOfLine)
+                        cursor.insertText('\n')
                 i += 1
             elif ch == '\b':
                 # BS：仅左移光标（不允许退到上一个文本块）
@@ -1042,11 +1097,7 @@ class SessionTab(QWidget):
                     cursor.removeSelectedText()
                 i += 1
             elif ch == '\t':
-                if cursor.atEnd():
-                    cursor.insertText("    ")
-                else:
-                    for _ in range(4):
-                        self._terminal_write_char(cursor, ' ')
+                self._write_printable_run(cursor, "    ")
                 i += 1
             elif ch == '\x1b':
                 seq_end = self._scan_escape_seq(text, i)
@@ -1062,11 +1113,7 @@ class SessionTab(QWidget):
                     j += 1
                 run = text[i:j]
                 if run:
-                    if cursor.atEnd():
-                        cursor.insertText(run)  # 文档末尾：批量追加（快速路径）
-                    else:
-                        for rc in run:
-                            self._terminal_write_char(cursor, rc)
+                    self._write_printable_run(cursor, run)
                 i = j
 
     @staticmethod
@@ -1382,6 +1429,20 @@ class SessionTab(QWidget):
         cc.setPosition(block_start + end_off, MODE.KeepAnchor)
         cc.insertText(' ' * (end_off - start_off))
 
+    def _normal_clear_screen(self, cursor):
+        """主屏清屏（ESC[2J，Ctrl+L / clear 命令）：xterm 语义
+
+        可见屏幕内容整体滚入回滚区（历史不丢失），光标归位到一块
+        rows 行空白新屏幕的首行行首，后续提示符从屏幕顶部开始打印。
+        （此前直接删除整个文档：历史全部丢失，新内容从顶端向下覆盖）
+        """
+        rows = self._get_screen_rows()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText('\n' * rows)
+        cursor.movePosition(QTextCursor.MoveOperation.Up,
+                            QTextCursor.MoveMode.MoveAnchor, rows - 1)
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+
     def _apply_cursor_sequence(self, cursor, seq):
         """应用 ANSI 光标/行编辑序列（readline 行编辑回显的核心）
 
@@ -1410,9 +1471,11 @@ class SessionTab(QWidget):
                     cursor.setPosition(pos)
                 return
             if c2 == 'c':
-                # RIS 终端复位：退出备用屏幕，恢复 shell 主屏
+                # RIS 终端复位：退出备用屏幕；主屏清屏（保留回滚）回到新屏幕顶部
                 if self._alt_screen_active:
                     self._exit_alt_screen(cursor, restore_cursor=False)
+                else:
+                    self._normal_clear_screen(cursor)
                 return
             if self._alt_screen_active:
                 # 全屏程序使用的索引类控制符
@@ -1432,7 +1495,9 @@ class SessionTab(QWidget):
             elif c == 'B':
                 cursor.movePosition(MOVE.Down)
             elif c == 'C':
-                cursor.movePosition(MOVE.Right)
+                block_end = cursor.block().position() + cursor.block().length() - 1
+                if cursor.position() < block_end:
+                    cursor.movePosition(MOVE.Right)
             elif c == 'D':
                 if cursor.position() > cursor.block().position():
                     cursor.movePosition(MOVE.Left)
@@ -1455,7 +1520,17 @@ class SessionTab(QWidget):
         elif end_char == 'B':
             cursor.movePosition(MOVE.Down, MODE.MoveAnchor, count)
         elif end_char == 'C':
-            cursor.movePosition(MOVE.Right, MODE.MoveAnchor, count)
+            if self._alt_screen_active:
+                # 备用屏幕：右侧为空白单元格时以空格填充后定位
+                row = cursor.block().blockNumber() + 1
+                col = cursor.position() - cursor.block().position() + 1
+                self._alt_move_to(cursor, row, col + count)
+            else:
+                # 主屏：右移不越过行尾（终端右边距语义，防止跨块错位）
+                block_end = cursor.block().position() + cursor.block().length() - 1
+                for _ in range(count):
+                    if cursor.position() < block_end:
+                        cursor.movePosition(MOVE.Right)
         elif end_char == 'D':
             # 左移不允许跨出当前文本块（终端中光标不会越过行首）
             block_start = cursor.block().position()
@@ -1485,19 +1560,28 @@ class SessionTab(QWidget):
                         col = params[0] if params else 1
                 self._alt_move_to(cursor, row, col)
             else:
-                # 主屏（readline）：只在当前输入行上定位列（行号忽略）
+                # 主屏（readline）：只在当前输入行上定位列（行号忽略），不越过行尾
                 col = params[-1] if params else 1
                 cursor.movePosition(MOVE.StartOfLine)
-                if col > 1:
-                    cursor.movePosition(MOVE.Right, MODE.MoveAnchor, col - 1)
+                block_end = cursor.block().position() + cursor.block().length() - 1
+                for _ in range(col - 1):
+                    if cursor.position() < block_end:
+                        cursor.movePosition(MOVE.Right)
         elif end_char == 'J':
-            # 清屏：0=光标到文末, 1=文首到光标, 2/3=全屏
+            # 清屏：0=光标到文末, 1=文首到光标, 2=全屏(内容滚入回滚区), 3=擦除回滚区
             mode = params[0] if params else 0
             if self._alt_screen_active:
                 self._alt_erase_display(cursor, mode)
-            elif mode == 2 or mode == 3:
-                cursor.select(QTextCursor.SelectionType.Document)
-                cursor.removeSelectedText()
+            elif mode == 2:
+                self._normal_clear_screen(cursor)
+            elif mode == 3:
+                # 擦除回滚区：删除当前行以上的历史内容，保留当前屏幕
+                block_start = cursor.block().position()
+                if block_start > 0:
+                    ec = QTextCursor(cursor.document())
+                    ec.movePosition(MOVE.Start)
+                    ec.setPosition(block_start, MODE.KeepAnchor)
+                    ec.removeSelectedText()
             elif mode == 1:
                 cursor.movePosition(MOVE.Start, MODE.KeepAnchor)
                 cursor.removeSelectedText()
