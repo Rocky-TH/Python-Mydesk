@@ -1,4 +1,5 @@
 import re
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QTextCharFormat, QFont
 
 
@@ -112,6 +113,12 @@ class ANSIParser:
         self.default_background = QColor(30, 30, 30)
         self.enable_color = enable_color
         self.is_dark = is_dark
+        # 反色（SGR 7）状态：用于保证重复设置幂等，并记录是否处于反色中
+        self._reverse = False
+        # 是否允许反色绘制背景。主屏（Shell 提示符）中 readline 会给粘贴内容
+        # 套 \x1b[7m 高亮，若按反色铺白底会让粘贴内容与主题背景割裂、甚至看不清，
+        # 因此主屏下由终端控件关闭，只保留主题常规配色；备用屏幕（vi/less）保留反色。
+        self.reverse_video_enabled = True
         self._update_color_maps()
         self.reset_format()
 
@@ -133,13 +140,41 @@ class ANSIParser:
         """重置格式为默认值（不设置背景色，使用控件透明背景）"""
         self.current_format = QTextCharFormat()
         self.current_format.setForeground(self.default_foreground)
+        self._reverse = False
+
+    def _brush_color(self, brush, fallback):
+        """取画刷颜色；NoBrush（未显式设置）时回退到主题默认色"""
+        if brush.style() == Qt.BrushStyle.NoBrush:
+            return QColor(fallback)
+        color = brush.color()
+        return QColor(color) if color.isValid() else QColor(fallback)
+
+    def _apply_reverse_video(self):
+        """应用 SGR 7 反色：前景/背景互换，未设置的一侧使用当前主题默认色
+
+        以主题默认色参与互换（而非 NoBrush 的黑色），保证反色后的文字
+        始终与背景形成对比；重复收到 7 时保持幂等，不会被来回翻转。
+        """
+        if not self.reverse_video_enabled or self._reverse:
+            return
+        fg = self._brush_color(self.current_format.foreground(), self.default_foreground)
+        bg = self._brush_color(self.current_format.background(), self.default_background)
+        self.current_format.setForeground(bg)
+        self.current_format.setBackground(fg)
+        self._reverse = True
+
+    def _clear_reverse_video(self):
+        """取消反色（SGR 27）：恢复主题前景色并清除背景"""
+        self.current_format.setForeground(self.default_foreground)
+        self.current_format.clearBackground()
+        self._reverse = False
 
     def parse_fast(self, text):
         """快速解析：仅提取纯文本，忽略ANSI序列（用于大量输出）"""
         return self.ANSI_PATTERN.sub('', text)
 
     def parse(self, text):
-        """解析包含ANSI转义序列的文本，返回(文本片段, 格式)列表
+        """解析包含ANSI转义序列的文本，按顺序产出(文本片段, 格式)
 
         关键设计：
         - SGR 颜色序列(\\x1b[...m)：由解析器消费并更新 current_format，不出现在片段中；
@@ -147,19 +182,23 @@ class ANSIParser:
         - 光标移动/行编辑类序列（A/B/C/D/H/f/G/K/J/@/P/X、私有模式 ?2004h 等）：
           原样放入文本片段透传给渲染层，由终端控件按终端语义执行光标操作，
           否则会出现"光标不动、行内编辑错乱、清行失效"等问题。
+
+        生成器实现：SGR 与透传序列严格按输出顺序生效。若一次性返回列表，
+        同一批数据中的"进入备用屏幕"（渲染层执行）会晚于其后的 SGR
+        （解析层执行），导致刚切屏时的样式按主屏规则处理。
         """
         # 快速检查是否包含ANSI序列
         if '\x1b' not in text:
-            return [(text, QTextCharFormat(self.current_format))]
+            yield text, QTextCharFormat(self.current_format)
+            return
 
-        parts = []
         last_end = 0
 
         for match in self.ANSI_PATTERN.finditer(text):
             # 添加转义序列前的纯文本
             if match.start() > last_end:
                 plain_text = text[last_end:match.start()]
-                parts.append((plain_text, QTextCharFormat(self.current_format)))
+                yield plain_text, QTextCharFormat(self.current_format)
 
             # 解析ANSI序列
             ansi_code = match.group()
@@ -168,13 +207,44 @@ class ANSIParser:
                 self.apply_ansi_code(ansi_code)
             else:
                 # 光标移动/行编辑/私有模式等：透传给渲染层执行
-                parts.append((ansi_code, QTextCharFormat(self.current_format)))
+                yield ansi_code, QTextCharFormat(self.current_format)
             last_end = match.end()
 
         # 添加剩余的纯文本
         if last_end < len(text):
-            plain_text = text[last_end:]
-            parts.append((plain_text, QTextCharFormat(self.current_format)))
+            yield text[last_end:], QTextCharFormat(self.current_format)
+
+    def parse_text(self, text):
+        """解析包含ANSI转义序列的文本，仅返回可见文本片段
+
+        与 parse() 的区别：光标移动/行编辑/私有模式等控制序列不参与文本渲染，
+        直接丢弃，只保留 SGR 颜色/格式序列产生的样式。
+        适用于日志、脚本输出等只做文本追加、不复现终端光标语义的场景。
+
+        Returns:
+            list: [(可见文本, QTextCharFormat), ...]
+        """
+        if '\x1b' not in text:
+            return [(text, QTextCharFormat(self.current_format))]
+
+        parts = []
+        last_end = 0
+
+        for match in self.ANSI_PATTERN.finditer(text):
+            if match.start() > last_end:
+                parts.append((text[last_end:match.start()],
+                              QTextCharFormat(self.current_format)))
+
+            ansi_code = match.group()
+            if self._is_format_sequence(ansi_code):
+                # SGR 颜色/格式序列：消费并更新当前格式
+                self.apply_ansi_code(ansi_code)
+            # OSC、光标移动、行编辑、私有模式等：一律丢弃，不加入可见文本
+
+            last_end = match.end()
+
+        if last_end < len(text):
+            parts.append((text[last_end:], QTextCharFormat(self.current_format)))
 
         return parts
 
@@ -240,11 +310,8 @@ class ANSIParser:
                     # 下划线
                     self.current_format.setFontUnderline(True)
                 elif code == 7:
-                    # 反色
-                    fg = self.current_format.foreground()
-                    bg = self.current_format.background()
-                    self.current_format.setForeground(bg)
-                    self.current_format.setBackground(fg)
+                    # 反色（readline 通过 \x1b[7m 标记粘贴内容的活动区域）
+                    self._apply_reverse_video()
                 elif code == 22:
                     # 取消加粗/变暗
                     self.current_format.setFontWeight(QFont.Weight.Normal)
@@ -252,9 +319,8 @@ class ANSIParser:
                     # 取消下划线
                     self.current_format.setFontUnderline(False)
                 elif code == 27:
-                    # 取消反色（仅恢复前景色，不设置背景色）
-                    self.current_format.setForeground(self.default_foreground)
-                    self.current_format.clearBackground()
+                    # 取消反色（恢复主题前景色，清除背景）
+                    self._clear_reverse_video()
                 elif code in self.color_map:
                     # 前景色
                     self.current_format.setForeground(self.color_map[code])

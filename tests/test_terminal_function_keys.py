@@ -68,11 +68,11 @@ def press(key, modifiers=Qt.KeyboardModifier.NoModifier, text=''):
 
 sent.clear()
 press(Qt.Key.Key_Home)
-check('2.1 Home 发送 \\x1b[1~（普通模式）', sent == ["\x1b[1~"], repr(sent))
+check('2.1 Home 发送 \\x1b[H（普通模式，xterm khome）', sent == ["\x1b[H"], repr(sent))
 
 sent.clear()
 press(Qt.Key.Key_End)
-check('2.2 End 发送 \\x1b[4~（普通模式）', sent == ["\x1b[4~"], repr(sent))
+check('2.2 End 发送 \\x1b[F（普通模式，xterm kend）', sent == ["\x1b[F"], repr(sent))
 
 sent.clear()
 press(Qt.Key.Key_Insert)
@@ -109,7 +109,7 @@ tab.write_output('\x1b[?1l')  # 关闭应用光标模式
 check('3.3 收到 \\x1b[?1l 后应用光标模式复位', tab._application_cursor_mode is False)
 
 press(Qt.Key.Key_Home)
-check('3.4 复位后 Home 恢复 \\x1b[1~', sent == ["\x1b[1~"], repr(sent))
+check('3.4 复位后 Home 恢复 \\x1b[H', sent == ["\x1b[H"], repr(sent))
 
 # ===== 4. Shift+Insert 仍为粘贴（不被 Ins 键序覆盖） =====
 from PyQt6.QtWidgets import QApplication as QApp

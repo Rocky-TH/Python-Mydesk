@@ -9,6 +9,7 @@ except ImportError:
     HAS_PARAMIKO = False
 
 from .connection_base import ConnectionBase
+from utils.logger import Logger
 
 
 class SSHConnection(ConnectionBase):
@@ -99,8 +100,8 @@ class SSHConnection(ConnectionBase):
                 self.shell.close()
             if self.client:
                 self.client.close()
-        except:
-            pass
+        except Exception as exc:
+            Logger.get_instance().debug(f"关闭 SSH 连接失败: {exc}")
         self.shell = None
         self.client = None
 
@@ -151,8 +152,7 @@ class SSHConnection(ConnectionBase):
                     data = data.encode('utf-8')
                 self.shell.send(data)
             except Exception as e:
-                print(f"发送数据失败: {e}")
-                pass
+                Logger.get_instance().warning(f"SSH 发送数据失败: {e}")
 
     def enable_keepalive(self, interval=30):
         """开启 SSH 保活：按间隔发送 SSH global request（keepalive@），
@@ -165,8 +165,8 @@ class SSHConnection(ConnectionBase):
             if self.transport and self.transport.is_active():
                 # paramiko 内部定时器，到期在传输线程发送 keepalive 包
                 self.transport.set_keepalive(interval)
-        except Exception:
-            pass
+        except Exception as exc:
+            Logger.get_instance().warning(f"SSH 传输层保活设置失败: {exc}")
         try:
             sock = getattr(self.transport, 'sock', None) if self.transport else None
             raw = getattr(sock, 'socket', None) or sock
@@ -178,8 +178,8 @@ class SSHConnection(ConnectionBase):
                 if hasattr(_socket, 'TCP_KEEPINTVL'):
                     raw.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL,
                                    max(1, interval // 3))
-        except Exception:
-            pass
+        except Exception as exc:
+            Logger.get_instance().warning(f"SSH socket 保活设置失败: {exc}")
 
     def get_endpoints(self):
         """返回 (本地地址, 远程地址) 字符串元组，供连接成功 banner 展示。
@@ -198,8 +198,8 @@ class SSHConnection(ConnectionBase):
                     local = f"{laddr[0]}:{laddr[1]}"
                 if isinstance(raddr, tuple) and len(raddr) >= 2:
                     remote = f"{raddr[0]}:{raddr[1]}"
-        except Exception:
-            pass
+        except Exception as exc:
+            Logger.get_instance().debug(f"读取 SSH 端点信息失败: {exc}")
         return local, remote
 
     def resize_pty(self, width=80, height=24):

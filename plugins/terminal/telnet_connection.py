@@ -8,6 +8,7 @@ except ImportError:
     HAS_TELNETLIB = False
 
 from .connection_base import ConnectionBase
+from utils.logger import Logger
 
 
 class TelnetConnection(ConnectionBase):
@@ -66,8 +67,8 @@ class TelnetConnection(ConnectionBase):
         try:
             if self.tn:
                 self.tn.close()
-        except:
-            pass
+        except Exception as exc:
+            Logger.get_instance().debug(f"关闭 Telnet 连接失败: {exc}")
         self.tn = None
 
     def send_command(self, command, timeout=1.0):
@@ -91,8 +92,8 @@ class TelnetConnection(ConnectionBase):
                     self.tn.write(data.encode('utf-8'))
                 else:
                     self.tn.write(data)
-            except:
-                pass
+            except Exception as exc:
+                Logger.get_instance().warning(f"Telnet 发送数据失败: {exc}")
 
     def read_output(self, timeout=0.1):
         """读取Telnet响应数据（非阻塞）"""
@@ -107,13 +108,14 @@ class TelnetConnection(ConnectionBase):
                 data = self.tn.read_very_eager()
                 if data:
                     return data.decode('utf-8', errors='replace')
-            except:
-                pass
+            except Exception as exc:
+                Logger.get_instance().debug(f"Telnet 非阻塞读取异常: {exc}")
             self.tn.sock.setblocking(True)
             
             # 尝试非阻塞读取
             return self.tn.read_very_eager().decode('utf-8', errors='replace')
-        except:
+        except Exception as exc:
+            Logger.get_instance().debug(f"Telnet 读取输出失败: {exc}")
             return ""
 
     def read_all(self, timeout=0.5):
@@ -146,8 +148,8 @@ class TelnetConnection(ConnectionBase):
                 if hasattr(_socket, 'TCP_KEEPINTVL'):
                     s.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL,
                                  max(1, interval // 3))
-        except Exception:
-            pass
+        except Exception as exc:
+            Logger.get_instance().warning(f"Telnet 保活设置失败: {exc}")
 
     def get_endpoints(self):
         """返回 (本地地址, 远程地址) 字符串元组，供连接成功 banner 展示"""
@@ -160,8 +162,8 @@ class TelnetConnection(ConnectionBase):
                     local = f"{laddr[0]}:{laddr[1]}"
                 if isinstance(raddr, tuple) and len(raddr) >= 2:
                     remote = f"{raddr[0]}:{raddr[1]}"
-        except Exception:
-            pass
+        except Exception as exc:
+            Logger.get_instance().debug(f"读取 Telnet 端点信息失败: {exc}")
         return local, remote
 
     def is_connected(self):
@@ -198,7 +200,8 @@ class TelnetConnection(ConnectionBase):
                             return (i, pattern, buffer)
                 
                 time.sleep(0.05)
-            except:
+            except Exception as exc:
+                Logger.get_instance().warning(f"Telnet expect 读取中断: {exc}")
                 break
         
         return (-1, "", buffer)

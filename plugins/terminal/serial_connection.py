@@ -9,6 +9,7 @@ except ImportError:
     HAS_SERIAL = False
 
 from .connection_base import ConnectionBase
+from utils.logger import Logger
 
 
 class SerialConnection(ConnectionBase):
@@ -82,7 +83,8 @@ class SerialConnection(ConnectionBase):
                     with self._lock:
                         self._buffer += decoded
                 time.sleep(0.01)  # 减少CPU占用
-            except:
+            except Exception as exc:
+                Logger.get_instance().warning(f"串口读取线程异常退出: {exc}")
                 break
 
     def disconnect(self):
@@ -91,8 +93,8 @@ class SerialConnection(ConnectionBase):
         try:
             if self.serial_conn and self.serial_conn.is_open:
                 self.serial_conn.close()
-        except:
-            pass
+        except Exception as exc:
+            Logger.get_instance().debug(f"关闭串口连接失败: {exc}")
         self.serial_conn = None
 
     def send_command(self, command, timeout=1.0):
@@ -125,8 +127,8 @@ class SerialConnection(ConnectionBase):
                     self.serial_conn.write(data.encode('utf-8'))
                 else:
                     self.serial_conn.write(data)
-            except:
-                pass
+            except Exception as exc:
+                Logger.get_instance().warning(f"串口发送数据失败: {exc}")
 
     def read_output(self, timeout=0.1):
         """读取串口缓冲区数据（非阻塞）"""

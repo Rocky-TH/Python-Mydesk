@@ -1,18 +1,18 @@
 import os
 import posixpath
 import re
-import threading
 import time
 import uuid
 from datetime import datetime
 from stat import S_ISDIR
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QSplitter,
+    QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QLabel, QLineEdit, QComboBox, QSpinBox, QPushButton,
-    QTextEdit, QTabWidget, QTabBar, QMessageBox, QCheckBox,
+    QTextEdit, QTabWidget, QTabBar, QMessageBox,
     QListWidget, QListWidgetItem, QMenu, QDialog,
     QPlainTextEdit, QFileDialog, QProgressDialog, QApplication,
-    QDialogButtonBox, QFrame, QStackedWidget, QToolButton, QSizePolicy
+    QFrame, QStackedWidget, QToolButton,
+    QInputDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QEvent
 from PyQt6.QtGui import (
@@ -21,11 +21,11 @@ from PyQt6.QtGui import (
 )
 from .connection_context import ConnectionContext
 from .ssh_connection import SSHConnection
-from .telnet_connection import TelnetConnection
 from .serial_connection import SerialConnection
 from .connection_manager import ConnectionManager
 from .connection_factory import ConnectionFactory
-from .ansi_parser import ANSIParser
+from utils.ansi_parser import ANSIParser
+from utils.logger import Logger
 from plugins.script_runner import Session, ScriptRunner
 
 # 下拉框三角形箭头图片路径
@@ -43,6 +43,173 @@ _DEFAULT_KEEPALIVE_INTERVAL = 300
 # 保活间隔允许的配置范围（秒）
 _KEEPALIVE_MIN = 30
 _KEEPALIVE_MAX = 7200
+
+# 串口/波特率候选值：快速连接栏与新建/编辑连接对话框共用
+_SERIAL_PORT_FALLBACK = [f'COM{i}' for i in range(1, 21)]
+_SERIAL_BAUD_CANDIDATES = ["9600", "19200", "38400", "57600", "115200"]
+
+# 各连接类型使用的字段集：快速连接栏与新建/编辑对话框共用一张表，
+# 避免出现“快速栏能填 telnet 密码、对话框却看不到”的不一致。
+_CONNECTION_FIELDS = {
+    'ssh': {'host', 'port', 'username', 'password', 'key_file'},
+    'telnet': {'host', 'port', 'username', 'password'},
+    'serial': {'serial'},
+}
+
+# 保活能力：串口没有链路层心跳，SSH/Telnet 均可应用
+_KEEPALIVE_SUPPORT = {'ssh': True, 'telnet': True, 'serial': False}
+
+
+def _apply_keepalive_to(strategy, conn_type, interval):
+    """对单个连接策略应用保活
+
+    Returns:
+        (state, error)：state 为 'applied' / 'unsupported' / 'failed'
+    """
+    if not _KEEPALIVE_SUPPORT.get(conn_type, False) or strategy is None \
+            or not hasattr(strategy, 'enable_keepalive'):
+        return 'unsupported', ''
+    try:
+        strategy.enable_keepalive(interval)
+        return 'applied', ''
+    except Exception as exc:
+        # 异常不静默：至少打印日志（会话输出由调用方补充）
+        print(f"[Terminal] 保活设置失败（{conn_type}）: {exc}")
+        return 'failed', str(exc)
+
+# 表单标签统一标尺：宽度固定、文字居中（与其它插件的表单项对齐）
+_FORM_LABEL_WIDTH = 80
+
+
+def _connection_fields(conn_type):
+    """返回连接类型对应的字段集合（未知类型按 SSH 处理）"""
+    return _CONNECTION_FIELDS.get(conn_type, _CONNECTION_FIELDS['ssh'])
+
+
+def _serial_port_candidates():
+    """枚举本机串口，复用 SerialConnection.list_ports()
+
+    枚举失败或为空时回退到 COM1–COM20，保证下拉始终有候选值。
+    """
+    try:
+        names = [str(p.get('name', '')).strip() for p in SerialConnection.list_ports()]
+    except Exception:
+        names = []
+    names = [name for name in names if name]
+    return names or list(_SERIAL_PORT_FALLBACK)
+
+
+def _reload_serial_ports(port_combo):
+    """刷新串口下拉候选，保留用户当前输入（可编辑，允许手填未知串口）"""
+    current = port_combo.currentText().strip()
+    ports = _serial_port_candidates()
+    port_combo.blockSignals(True)
+    port_combo.clear()
+    port_combo.addItems(ports)
+    port_combo.blockSignals(False)
+    if current:
+        _set_combo_text(port_combo, current)
+    elif ports:
+        port_combo.setCurrentText(ports[0])
+
+
+def _make_form_label(text, style=""):
+    """创建统一宽度、文字居中的表单标签"""
+    label = QLabel(text)
+    if style:
+        label.setStyleSheet(style)
+    label.setFixedWidth(_FORM_LABEL_WIDTH)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return label
+
+
+def _get_on_primary_color(config_manager, default='#ffffff'):
+    """主色背景上的文字颜色：取主题 components.button.color"""
+    if config_manager:
+        try:
+            value = config_manager.get_component_style_value('button', 'color', default)
+            if value:
+                return value
+        except Exception as exc:
+            Logger.get_instance().debug(f"读取主题按钮文字色失败: {exc}")
+    return default
+
+
+def _configure_serial_combos(port_combo, baud_combo):
+    """把串口/波特率下拉配置为可编辑并填充统一候选值
+
+    串口候选来自 SerialConnection.list_ports() 的动态枚举（失败时回退
+    COM1–COM20）；可编辑是为了支持 COM30、256000 这类候选之外的值，
+    保证快速连接栏与新建/编辑对话框能原样保存用户输入。
+    """
+    ports = _serial_port_candidates()
+    port_combo.setEditable(True)
+    port_combo.clear()
+    port_combo.addItems(ports)
+    port_combo.setCurrentText('COM1' if 'COM1' in ports else ports[0])
+
+    baud_combo.setEditable(True)
+    baud_combo.clear()
+    baud_combo.addItems(_SERIAL_BAUD_CANDIDATES)
+    baud_combo.setCurrentText('115200')
+
+
+def _set_combo_text(combo, value):
+    """设置下拉当前值；值不在候选里时临时插入，避免编辑已有连接时丢值"""
+    text = str(value)
+    if combo.findText(text) < 0:
+        combo.insertItem(0, text)
+    combo.setCurrentText(text)
+
+
+def _normalize_connection_values(conn_type, host, port, username, password,
+                                 key_file, serial_port, baud, name=None):
+    """校验并规范化连接参数（快速连接栏与新建/编辑对话框共用）
+
+    Returns:
+        (conn_data, error_message, focus_field)
+        校验通过时 conn_data 为连接配置字典、error_message 为空；
+        校验失败时 conn_data 为 None，focus_field 标识需要聚焦的字段。
+    """
+    name = (name or '').strip()
+
+    if conn_type == 'serial':
+        serial_port = (serial_port or '').strip()
+        if not serial_port:
+            return None, "请填写串口号", 'serial_port'
+        try:
+            baud_value = int(str(baud or '').strip() or '115200')
+        except (ValueError, TypeError):
+            baud_value = 115200
+        return {
+            # 名称为空时回退为串口号，与快速连接栏命名策略一致
+            'name': name or serial_port,
+            'type': 'serial',
+            'config': {'port': serial_port, 'baud': baud_value},
+        }, '', ''
+
+    host = (host or '').strip()
+    if not host:
+        return None, "请填写主机地址", 'host'
+    password = password or ''
+    key_file = (key_file or '').strip()
+    # SSH：密码与密钥文件任一存在即可
+    if conn_type == 'ssh' and not password and not key_file:
+        return None, "请填写密码或选择密钥文件", 'password'
+    config = {
+        'host': host,
+        'port': port,
+        'username': (username or '').strip(),
+        'password': password,
+    }
+    if conn_type == 'ssh':
+        config['key_file'] = key_file
+    return {
+        # 名称为空时回退为主机地址
+        'name': name or host,
+        'type': conn_type,
+        'config': config,
+    }, '', ''
 
 
 class TerminalPlugin:
@@ -65,7 +232,7 @@ class TerminalPlugin:
     def deactivate(self):
         pass
 
-    # 终端工具支持的字体大小档位（与 show_font_size_menu 保持一致）
+    # 终端工具支持的字体大小档位（与「终端 → 字体大小」菜单保持一致）
     _FONT_SIZES = [
         ("8px", 8),
         ("10px", 10),
@@ -123,6 +290,10 @@ class TerminalPlugin:
                 checked=(int(keepalive_interval) == seconds),
                 group="terminal_keepalive",
             )
+        keepalive_menu.add_action(
+            "自定义…",
+            lambda checked: widget.prompt_custom_keepalive(),
+        )
         keepalive_menu.end()
 
         builder.add_action(
@@ -176,6 +347,22 @@ class TerminalEdit(QTextEdit):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.set_style()
 
+    def _get_style(self, key, default=None):
+        if self._config_manager:
+            return self._config_manager.get_color(key, default)
+        value = self._color_scheme.get(key)
+        return default if value is None else value
+
+    def _get_font_size(self, key, default='12px'):
+        if self._config_manager:
+            return self._config_manager.get_font_size(key, default)
+        return default
+
+    def _get_border_radius(self, key, default='4px'):
+        if self._config_manager:
+            return self._config_manager.get_border_radius(key, default)
+        return default
+
     def set_style(self):
         text_color = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
         border_focus = self._color_scheme.get('border-focus', self._color_scheme.get('border_focus', '#007acc'))
@@ -195,17 +382,19 @@ class TerminalEdit(QTextEdit):
         """获取适配主题的右键菜单 CSS 样式"""
         if self._config_manager:
             return self._config_manager.get_menu_css()
-        # 降级：使用 color_scheme 中的颜色构建菜单样式
-        bg = self._color_scheme.get('bg-tertiary', '#2d2d30')
-        color = self._color_scheme.get('text', '#ffffff')
-        border = self._color_scheme.get('border-light', '#4a4a4d')
-        item_selected_bg = self._color_scheme.get('primary', '#007acc')
+        # 降级：使用主题/token 中的颜色构建菜单样式
+        bg = self._get_style('bg-tertiary', '#2d2d30')
+        color = self._get_style('text', '#ffffff')
+        border = self._get_style('border-light', '#4a4a4d')
+        item_selected_bg = self._get_style('primary', '#007acc')
+        item_selected_color = self._get_style('selection-text', '#ffffff')
+        radius = self._get_border_radius('md', '6px')
         return f"""
             QMenu {{
                 background-color: {bg};
                 color: {color};
                 border: 1px solid {border};
-                border-radius: 6px;
+                border-radius: {radius};
                 padding: 4px;
             }}
             QMenu::item {{
@@ -215,7 +404,7 @@ class TerminalEdit(QTextEdit):
             }}
             QMenu::item:selected {{
                 background-color: {item_selected_bg};
-                color: #ffffff;
+                color: {item_selected_color};
             }}
             QMenu::separator {{
                 height: 1px;
@@ -354,8 +543,9 @@ class ConnectionWorker(QThread):
             if hasattr(self._strategy, 'read_output'):
                 try:
                     initial_output = self._strategy.read_output(timeout=0.2) or ""
-                except Exception:
+                except Exception as exc:
                     initial_output = ""
+                    Logger.get_instance().debug(f"读取会话初始输出失败: {exc}")
             self.connected.emit(True, initial_output, "")
         except Exception as e:
             self.connected.emit(False, "", str(e))
@@ -414,8 +604,6 @@ class SessionTab(QWidget):
         self._config_manager = config_manager
         self.connection_context = ConnectionContext()
         self.current_connection = None
-        self.command_history = []
-        self.history_index = -1
         self.current_input = ""
         self.interactive_mode = False
         self._tab_pending = False  # Tab补全等待标志：下次输出时从display提取补全结果
@@ -437,6 +625,11 @@ class SessionTab(QWidget):
         # 根据背景色亮度判断主题模式，决定ANSI颜色映射
         is_dark = self._is_dark_theme()
         self.ansi_parser = ANSIParser(default_foreground=QColor(text_hex), is_dark=is_dark)
+        # 反色（\x1b[7m）使用的主题背景色：主屏禁用反色（见 ANSIParser 注释），
+        # 备用屏幕（vi/less）启用，且以主题背景色参与前景/背景互换
+        bg_hex = self._color_scheme.get('bg-main', self._color_scheme.get('background_main', '#1e1e1e'))
+        self.ansi_parser.default_background = QColor(bg_hex)
+        self.ansi_parser.reverse_video_enabled = False
         self._output_buffer = ""  # 输出缓冲区，用于处理跨数据块的ANSI序列
         self._output_history = []  # 原始输出历史（text, color），用于主题切换时重新渲染
         self._output_history_max = 2000  # 最大历史条目数，防止内存无限增长
@@ -447,6 +640,7 @@ class SessionTab(QWidget):
         self._log_dir = _TERMINAL_LOG_DIR
         self._log_file = None
         self._log_path = ""
+        self._log_write_error_reported = False
 
         self.init_ui()
     
@@ -466,6 +660,18 @@ class SessionTab(QWidget):
         }
         if key in old_key_map:
             return self._color_scheme.get(old_key_map[key], default)
+        return default
+
+    def _get_font_size(self, key, default='12px'):
+        """获取字体大小（优先主题配置，回退默认值）"""
+        if self._config_manager:
+            return self._config_manager.get_font_size(key, default)
+        return default
+
+    def _get_border_radius(self, key, default='4px'):
+        """获取边框圆角（优先主题配置，回退默认值）"""
+        if self._config_manager:
+            return self._config_manager.get_border_radius(key, default)
         return default
 
     def _is_dark_theme(self):
@@ -488,6 +694,7 @@ class SessionTab(QWidget):
         text_color = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
         border = self._color_scheme.get('border', '#3c3c3c')
         border_focus = self._color_scheme.get('border-focus', self._color_scheme.get('border_focus', '#007acc'))
+        radius_lg = self._get_border_radius('lg', '8px')
         
         self.terminal_display = TerminalEdit(self._color_scheme, self._config_manager)
         self.terminal_display.setFont(QFont("Consolas", 11))
@@ -499,7 +706,7 @@ class SessionTab(QWidget):
                 background-color: transparent;
                 color: {text_color};
                 border: 1px solid {border};
-                border-radius: 8px;
+                border-radius: {radius_lg};
                 margin: 6px;
             }}
             QTextEdit:focus {{
@@ -516,7 +723,9 @@ class SessionTab(QWidget):
         # 兼容字段：保留为隐藏 QLabel 防止外部访问出错
         text_primary = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
         self.status_label = QLabel("未连接")
-        self.status_label.setStyleSheet(f"color: {text_primary}; font-weight: bold; font-size: 12px;")
+        self.status_label.setStyleSheet(
+            f"color: {text_primary}; font-weight: bold; "
+            f"font-size: {self._get_font_size('size-md', '12px')};")
         self.connection_info = QLabel("")
         self.connection_type_label = QLabel("")
 
@@ -589,6 +798,7 @@ class SessionTab(QWidget):
         text_color = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
         border = self._color_scheme.get('border', '#3c3c3c')
         border_focus = self._color_scheme.get('border-focus', self._color_scheme.get('border_focus', '#007acc'))
+        radius_lg = self._get_border_radius('lg', '8px')
 
         # 更新终端显示控件样式（透明背景，仅保留边框和文字颜色）
         self.terminal_display._color_scheme = self._color_scheme
@@ -597,7 +807,7 @@ class SessionTab(QWidget):
                 background-color: transparent;
                 color: {text_color};
                 border: 1px solid {border};
-                border-radius: 8px;
+                border-radius: {radius_lg};
                 margin: 6px;
             }}
             QTextEdit:focus {{
@@ -607,6 +817,9 @@ class SessionTab(QWidget):
 
         # 更新ANSI解析器：默认前景色 + 主题模式（浅色主题下加深白色/黄色等浅色文字）
         self.ansi_parser.default_foreground = QColor(text_color)
+        self.ansi_parser.default_background = QColor(
+            self._color_scheme.get('bg-main', self._color_scheme.get('background_main', '#1e1e1e'))
+        )
         self.ansi_parser.set_theme_mode(self._is_dark_theme())
         self.ansi_parser.reset_format()
 
@@ -630,6 +843,7 @@ class SessionTab(QWidget):
 
         # 重置备用屏幕状态：重放过程由输出流中的 1049h/l 序列重新驱动屏幕切换
         self._alt_screen_active = False
+        self.ansi_parser.reverse_video_enabled = False
         self._alt_saved_html = ""
         self._alt_saved_cursor_pos = None
         self._alt_scroll_pending = False
@@ -658,17 +872,21 @@ class SessionTab(QWidget):
     def _refresh_status_label_style(self):
         """根据连接状态刷新状态标签样式"""
         text_color = self._color_scheme.get('text', self._color_scheme.get('text_primary', '#ffffff'))
+        status_font_size = self._get_font_size('size-md', '12px')
         if self._connection_lost:
             # 连接中断：使用危险色
             danger_color = self._get_style('text-danger', '#f44747')
-            self.status_label.setStyleSheet(f"color: {danger_color}; font-weight: bold; font-size: 12px;")
+            self.status_label.setStyleSheet(
+                f"color: {danger_color}; font-weight: bold; font-size: {status_font_size};")
         elif self.connection_context.is_connected():
             # 已连接：使用成功色
             success_color = self._get_style('text-success', '#4ec9b0')
-            self.status_label.setStyleSheet(f"color: {success_color}; font-weight: bold; font-size: 12px;")
+            self.status_label.setStyleSheet(
+                f"color: {success_color}; font-weight: bold; font-size: {status_font_size};")
         else:
             # 未连接：使用默认文字色
-            self.status_label.setStyleSheet(f"color: {text_color}; font-weight: bold; font-size: 12px;")
+            self.status_label.setStyleSheet(
+                f"color: {text_color}; font-weight: bold; font-size: {status_font_size};")
 
     def _set_status(self, text):
         """更新会话状态并上报到框架状态接口"""
@@ -704,12 +922,6 @@ class SessionTab(QWidget):
                 return
             parent = parent.parent()
 
-    # ========== 公共接口 ==========
-
-    def get_connection(self):
-        """获取当前连接上下文"""
-        return self.connection_context
-
     def _get_keepalive_interval(self):
         """从父级 TerminalWidget 读取当前配置的保活间隔（秒），缺省 5 分钟"""
         parent = self.parent()
@@ -722,23 +934,6 @@ class SessionTab(QWidget):
                     return _DEFAULT_KEEPALIVE_INTERVAL
             parent = parent.parent()
         return _DEFAULT_KEEPALIVE_INTERVAL
-
-    def send(self, data):
-        """发送数据到远程"""
-        if self.connection_context.is_connected():
-            strategy = self.connection_context._strategy
-            if hasattr(strategy, 'send_raw'):
-                strategy.send_raw(data)
-                return True
-        return False
-
-    def recv(self, timeout=0.1):
-        """接收远程数据"""
-        if self.connection_context.is_connected():
-            strategy = self.connection_context._strategy
-            if hasattr(strategy, 'read_output'):
-                return strategy.read_output(timeout)
-        return ""
 
     # ========== 内部方法 ==========
 
@@ -787,6 +982,7 @@ class SessionTab(QWidget):
         base = conn.get('name') or config.get('host') or config.get('port') or 'session'
         safe_name = re.sub(r'[^A-Za-z0-9_.\-]', '_', str(base))[:40].strip('_') or 'session'
         filename = f"terminal_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self._log_write_error_reported = False
         try:
             os.makedirs(self._log_dir, exist_ok=True)
             self._log_path = os.path.join(self._log_dir, filename)
@@ -797,7 +993,7 @@ class SessionTab(QWidget):
             )
             self._log_file.flush()
         except Exception as e:
-            print(f"打开终端日志文件失败: {e}")
+            Logger.get_instance().error(f"打开终端日志文件失败: {e}", exc_info=True)
             self._log_file = None
             self._log_path = ""
 
@@ -809,8 +1005,8 @@ class SessionTab(QWidget):
                     f"===== 会话结束 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====\n"
                 )
                 self._log_file.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                Logger.get_instance().debug(f"关闭终端日志文件失败: {exc}")
         self._log_file = None
 
     def _write_session_log(self, text):
@@ -822,8 +1018,12 @@ class SessionTab(QWidget):
             clean = clean.replace('\r\n', '\n').replace('\r', '')
             self._log_file.write(clean)
             self._log_file.flush()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 写日志失败不打断终端输出；每个会话只上报一次，避免刷屏
+            if not self._log_write_error_reported:
+                self._log_write_error_reported = True
+                Logger.get_instance().error(
+                    f"写入终端会话日志失败: {exc}", exc_info=True)
 
     def _render_text(self, text, color=None):
         """将文本渲染到终端显示控件（内部方法，不记录历史）
@@ -1090,8 +1290,9 @@ class SessionTab(QWidget):
                 # BEL/SO/SI：无显示效果，跳过
                 i += 1
             elif ch == '\x7f':
-                # DEL（输出流中罕见）：删除光标右侧字符
-                if not cursor.atEnd():
+                # DEL（输出流中罕见）：删除光标右侧字符（不跨行删除换行符）
+                line_end = cursor.block().position() + cursor.block().length() - 1
+                if cursor.position() < line_end:
                     cursor.movePosition(QTextCursor.MoveOperation.Right,
                                         QTextCursor.MoveMode.KeepAnchor, 1)
                     cursor.removeSelectedText()
@@ -1146,6 +1347,13 @@ class SessionTab(QWidget):
             if i + 2 < n:
                 return i + 3
             return i
+        if c1 in '()#%':
+            # 字符集选择/制表符设置/字符集声明：ESC ( B、ESC ) 0、ESC # 8、ESC % G
+            # 均为 3 字节序列；只消费 2 字节会把末尾的 'B'/'0'/'8' 当可见字符
+            # 写到屏幕上（vi 启动和重绘时反复发送，会污染首行并让排版错乱）
+            if i + 2 < n:
+                return i + 3
+            return i
         # 其他 Fe 序列: ESC + 单字符
         return i + 2
 
@@ -1167,6 +1375,8 @@ class SessionTab(QWidget):
         self._alt_scroll_pending = False
         self._screen_rows = self._get_screen_rows()
         self._scroll_region = (1, self._screen_rows)
+        # 主屏不启用反色背景（readline 粘贴高亮会铺白底，见 ANSIParser 注释）
+        self.ansi_parser.reverse_video_enabled = False
 
     def _enter_alt_screen(self, cursor, save_cursor=True):
         """进入备用屏幕：保存主屏 HTML 快照，清屏并构建 rows 行空白屏幕，光标归位左上角
@@ -1180,6 +1390,8 @@ class SessionTab(QWidget):
             return
         disp = self.terminal_display
         self._alt_screen_active = True
+        # 备用屏幕（vi/less）保留 SGR 7 反色语义（状态行等）
+        self.ansi_parser.reverse_video_enabled = True
         self._alt_saved_html = disp.toHtml()
         self._alt_saved_scroll = disp.verticalScrollBar().value()
         self._alt_saved_cursor_pos = cursor.position() if save_cursor else None
@@ -1208,6 +1420,8 @@ class SessionTab(QWidget):
         saved_pos = self._alt_saved_cursor_pos
         saved_scroll = self._alt_saved_scroll
         self._alt_screen_active = False
+        # 回到主屏后关闭反色背景（粘贴高亮不再铺白底）
+        self.ansi_parser.reverse_video_enabled = False
         self._alt_saved_html = ""
         self._alt_saved_cursor_pos = None
         self._alt_scroll_pending = False
@@ -1244,11 +1458,14 @@ class SessionTab(QWidget):
         col = max(1, int(col))
 
         cur_row = cursor.block().blockNumber() + 1
-        if row > cur_row:
-            self._alt_ensure_lines(cursor, row)
-            cursor.movePosition(MOVE.Down, MODE.MoveAnchor, row - cur_row)
-        elif row < cur_row:
-            cursor.movePosition(MOVE.Up, MODE.MoveAnchor, cur_row - row)
+        if cur_row != row or cursor.document().blockCount() < rows:
+            # 保证屏幕始终有 rows 行（DCH/滚动异常也不会塌缩），
+            # 并改用「文首 + 下移」的绝对定位：_alt_ensure_lines 会把光标
+            # 带到文档末尾，若再按相对行差下移，光标就会停在底部而不是目标行。
+            self._alt_ensure_lines(cursor, rows)
+            cursor.movePosition(MOVE.Start)
+            if row > 1:
+                cursor.movePosition(MOVE.Down, MODE.MoveAnchor, row - 1)
 
         cursor.movePosition(MOVE.StartOfLine)
         line_len = cursor.block().length() - 1  # 不含块分隔符
@@ -1369,6 +1586,7 @@ class SessionTab(QWidget):
         MODE = QTextCursor.MoveMode
         row = cursor.block().blockNumber() + 1
         col0 = cursor.position() - cursor.block().position()
+        saved_pos = cursor.position()
         doc = cursor.document()
 
         if mode in (2, 3):
@@ -1394,8 +1612,9 @@ class SessionTab(QWidget):
             if row - 1 > 0:
                 cc.movePosition(MOVE.Down, MODE.MoveAnchor, row - 1)
             cc.movePosition(MOVE.StartOfLine)
-            cc.movePosition(MOVE.Right, MODE.KeepAnchor, col0)
+            cc.movePosition(MOVE.Right, MODE.KeepAnchor, min(col0 + 1, cc.block().length() - 1))
             cc.insertText(' ' * len(cc.selectedText()))
+            cursor.setPosition(saved_pos)  # ED 不移动光标
         else:
             # 光标到文末：当前行光标到行尾填空格，下方所有行清空
             cc = QTextCursor(cursor)
@@ -1411,23 +1630,33 @@ class SessionTab(QWidget):
                     ec.removeSelectedText()
                     if not ec.movePosition(MOVE.Down):
                         break
+            cursor.setPosition(saved_pos)  # ED 不移动光标
 
     def _alt_erase_line(self, cursor, mode):
-        """EL（ESC[K）在备用屏幕上的实现：擦除区域以空格填充，行结构不变"""
+        """EL（ESC[K）在备用屏幕上的实现：擦除区域以空格填充，行结构不变
+
+        注意：擦除由独立游标改写文本完成，Qt 会把主游标推到改写区末尾，
+        必须显式复位；否则 vi 每次重绘命令行光标都会右移，最终写满整行
+        触发自动换行/滚动，表现为命令持续堆积在屏幕底部。
+        """
         MODE = QTextCursor.MoveMode
         block_start = cursor.block().position()
         line_len = cursor.block().length() - 1
         cur_off = cursor.position() - block_start
+        saved_pos = cursor.position()
         if mode == 2:
             start_off, end_off = 0, line_len
         elif mode == 1:
-            start_off, end_off = 0, cur_off
+            # EL 1 擦除范围包含光标所在单元格
+            start_off, end_off = 0, min(cur_off + 1, line_len)
         else:
             start_off, end_off = cur_off, line_len
-        cc = QTextCursor(cursor.document())
-        cc.setPosition(block_start + start_off)
-        cc.setPosition(block_start + end_off, MODE.KeepAnchor)
-        cc.insertText(' ' * (end_off - start_off))
+        if end_off > start_off:
+            cc = QTextCursor(cursor.document())
+            cc.setPosition(block_start + start_off)
+            cc.setPosition(block_start + end_off, MODE.KeepAnchor)
+            cc.insertText(' ' * (end_off - start_off))
+            cursor.setPosition(saved_pos)  # 擦除不移动光标（终端语义）
 
     def _normal_clear_screen(self, cursor):
         """主屏清屏（ESC[2J，Ctrl+L / clear 命令）：xterm 语义
@@ -1606,21 +1835,33 @@ class SessionTab(QWidget):
                 cursor.removeSelectedText()
         elif end_char == '@':
             # ICH 插入字符位：在光标处腾出 count 个空格（后续字符覆盖填入），
-            # 光标保持在插入点不动
-            cursor.insertText(' ' * count)
-            cursor.movePosition(MOVE.Left, MODE.MoveAnchor, count)
-        elif end_char == 'P':
-            # DCH 删除字符：删除光标右侧 count 个字符，尾部左移
-            cursor.movePosition(MOVE.Right, MODE.KeepAnchor, count)
-            cursor.removeSelectedText()
-        elif end_char == 'X':
-            # ECH 擦除字符：光标右侧 count 个字符替换为空格，光标不动
+            # 光标保持在插入点不动；插入量受右边距限制，避免把行撑过屏宽后
+            # 触发自动换行、导致整屏内容错位
             start = cursor.position()
-            cursor.movePosition(MOVE.Right, MODE.KeepAnchor, count)
-            erased = cursor.position() - start
-            if erased > 0:
-                cursor.insertText(' ' * erased)
-                cursor.movePosition(MOVE.Left, MODE.MoveAnchor, erased)
+            col = start - cursor.block().position()
+            n = min(count, max(0, self._get_screen_cols() - col))
+            if n > 0:
+                cursor.insertText(' ' * n)
+                cursor.setPosition(start)
+        elif end_char == 'P':
+            # DCH 删除字符：删除光标右侧 count 个字符，尾部左移。
+            # 必须限制在当前行内：跨块删除会吃掉换行符，使下一行并入当前行，
+            # 屏幕行数塌缩，vi 后续绝对定位就会全部落到屏幕底部。
+            line_end = cursor.block().position() + cursor.block().length() - 1
+            remain = max(0, line_end - cursor.position())
+            n = min(count, remain)
+            if n > 0:
+                cursor.movePosition(MOVE.Right, MODE.KeepAnchor, n)
+                cursor.removeSelectedText()
+        elif end_char == 'X':
+            # ECH 擦除字符：光标右侧 count 个字符替换为空格，光标不动（不跨行）
+            start = cursor.position()
+            line_end = cursor.block().position() + cursor.block().length() - 1
+            n = min(count, max(0, line_end - start))
+            if n > 0:
+                cursor.movePosition(MOVE.Right, MODE.KeepAnchor, n)
+                cursor.insertText(' ' * n)
+                cursor.setPosition(start)
         elif end_char == 's':
             self._saved_cursor_pos = cursor.position()
         elif end_char == 'u':
@@ -1679,13 +1920,6 @@ class SessionTab(QWidget):
                     cursor.setPosition(pos)
         # 其余序列（I/Z 制表、g 清制表位、q 光标样式、~ 功能键/粘贴标记、
         # c/n 设备查询等）无显示效果，忽略
-
-    def make_format(self, color):
-        """创建文本格式"""
-        from PyQt6.QtGui import QTextCharFormat
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(color))
-        return fmt
 
     def poll_remote_output(self):
         """轮询远程输出（交互模式），使用缓冲区处理跨数据块的ANSI序列"""
@@ -1864,6 +2098,12 @@ class SessionTab(QWidget):
                 return start + 3  # \x1b + O + 字母
             return start  # 不完整
 
+        # === 字符集/制表符/字符集声明: ESC ( X、ESC ) X、ESC # X、ESC % X ===
+        if c1 in '()#%':
+            if start + 2 < n:
+                return start + 3
+            return start  # 不完整，等待第三个字节
+
         # === 其他: \x1b + 单个字符（如 \x1b=, \x1b> 等） ===
         return start + 2
 
@@ -1939,21 +2179,22 @@ class SessionTab(QWidget):
 
         if key == Qt.Key.Key_Home:
             if has_raw:
-                # DECCKM 应用模式（\x1b[?1h，vim/less 等开启）发送 SS3 形式；
-                # 普通模式发送 \x1b[1~（Debian/Ubuntu inputrc 与 readline
-                # 默认绑定的 Home 键序，PuTTY 等主流终端同样发送此序列）
+                # Home 键：DECCKM 应用模式发送 SS3（\x1bOH），普通模式发送
+                # \x1b[H。这是 xterm 的默认键序，也正是 xterm-256color
+                # terminfo 中 khome 的定义，readline/vim 会据此自动绑定；
+                # 之前的 \x1b[1~ 在 xterm-256color 下未绑定，导致 Home 失效。
                 if self._application_cursor_mode:
                     strategy.send_raw("\x1bOH")
                 else:
-                    strategy.send_raw("\x1b[1~")
+                    strategy.send_raw("\x1b[H")
             return
         elif key == Qt.Key.Key_End:
             if has_raw:
-                # End 键：应用模式 SS3 / 普通模式 \x1b[4~（同 Home 的兼容性策略）
+                # End 键：应用模式 \x1bOF，普通模式 \x1b[F（kend 定义）
                 if self._application_cursor_mode:
                     strategy.send_raw("\x1bOF")
                 else:
-                    strategy.send_raw("\x1b[4~")
+                    strategy.send_raw("\x1b[F")
             return
 
         if key == Qt.Key.Key_Insert:
@@ -2022,20 +2263,6 @@ class SessionTab(QWidget):
                 self.current_input += text
                 self.write_output(text, 'text')
     
-    def _get_backspace_char(self):
-        """获取退格字符，支持配置或自动检测"""
-        # 默认使用 \x08 (BS - Backspace)，这是大多数现代终端的标准
-        # 某些旧系统可能需要 \x7f (DEL)
-        return getattr(self, '_backspace_char', '\x08')
-
-    def _auto_detect_backspace(self):
-        """自动检测服务器期望的退格字符类型"""
-        # 发送测试序列，检测服务器响应
-        # 大多数现代SSH服务器使用 \x08 (BS)
-        # 某些旧系统或特定配置可能需要 \x7f (DEL)
-        # 这里我们采用保守策略：默认使用 \x08，如果出现乱码则切换到 \x7f
-        pass
-
     def handle_input_method_text(self, text):
         """处理输入法输入的文本（如中文）"""
         if not self.connection_context.is_connected():
@@ -2160,8 +2387,6 @@ class SessionTab(QWidget):
                         self.write_output("\n")
                         cmd = self.current_input
                         self.current_input = ""
-                        self.command_history.append(cmd)
-                        self.history_index = len(self.command_history)
                         response = self.connection_context.send_command(cmd)
                         if response:
                             self.write_output(response, 'text-secondary')
@@ -2175,23 +2400,6 @@ class SessionTab(QWidget):
             else:
                 self.current_input += text
                 self.write_output(text, 'text')
-
-    def navigate_history(self, direction):
-        """导航命令历史（交互模式）"""
-        if not self.command_history:
-            return
-
-        self.history_index += direction
-
-        if self.history_index < 0:
-            self.history_index = 0
-        elif self.history_index >= len(self.command_history):
-            self.history_index = len(self.command_history)
-            # 发送Ctrl+C取消当前输入，然后输入空命令
-            self.current_input = ""
-        else:
-            cmd = self.command_history[self.history_index]
-            self.current_input = cmd
 
     def redraw_input_line(self):
         """重绘输入行（非交互模式）"""
@@ -2221,9 +2429,6 @@ class SessionTab(QWidget):
             self.write_output("\n")
             self.show_input_line()
             return
-
-        self.command_history.append(self.current_input)
-        self.history_index = len(self.command_history)
 
         cmd = self.current_input
         self.current_input = ""
@@ -2316,13 +2521,12 @@ class SessionTab(QWidget):
                 # 默认开启连接保活，避免长时间空闲被 NAT/防火墙超时断开
                 # 保活间隔由「终端 → 保活时间」菜单配置（默认 5 分钟）
                 keepalive_interval = self._get_keepalive_interval()
-                if hasattr(strategy, 'enable_keepalive'):
-                    try:
-                        strategy.enable_keepalive(keepalive_interval)
-                    except Exception:
-                        pass
+                keepalive_state, keepalive_error = self._apply_keepalive(
+                    strategy, conn_type, keepalive_interval)
                 # 连接成功 banner（双方地址、协议、时间等），先于服务器初始输出显示
-                self._write_connect_banner(conn_type, config, strategy, keepalive_interval)
+                self._write_connect_banner(conn_type, config, strategy,
+                                           keepalive_interval,
+                                           keepalive_state, keepalive_error)
                 if initial_output:
                     self.write_output(initial_output)
                 # 连接成功后立即根据终端实际宽度调整PTY大小，避免长路径无法显示
@@ -2336,8 +2540,12 @@ class SessionTab(QWidget):
                 self.output_timer.start(30)  # 30ms间隔，提高响应速度
             else:
                 self.interactive_mode = False
+                keepalive_interval = self._get_keepalive_interval()
+                keepalive_state, keepalive_error = self._apply_keepalive(
+                    strategy, conn_type, keepalive_interval)
                 self._write_connect_banner(conn_type, config, strategy,
-                                           self._get_keepalive_interval())
+                                           keepalive_interval,
+                                           keepalive_state, keepalive_error)
                 self.show_input_line()
 
             # 连接成功后焦点交给终端输入区（重新连接/复制连接等操作无需再点击）
@@ -2354,7 +2562,8 @@ class SessionTab(QWidget):
         # 清理工作线程引用
         self._connection_worker = None
 
-    def _write_connect_banner(self, conn_type, config, strategy, keepalive_interval=None):
+    def _write_connect_banner(self, conn_type, config, strategy, keepalive_interval=None,
+                              keepalive_state=None, keepalive_error=''):
         """连接成功后输出 banner：连接名称、协议、本地/远程地址、用户、时间、保活状态"""
         bar = '─' * 58
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -2376,8 +2585,9 @@ class SessionTab(QWidget):
             if strategy is not None and hasattr(strategy, 'get_endpoints'):
                 try:
                     local, remote = strategy.get_endpoints()
-                except Exception:
+                except Exception as exc:
                     local, remote = '', ''
+                    Logger.get_instance().debug(f"读取连接端点信息失败: {exc}")
             host = config.get('host', '')
             port = config.get('port', '')
             if not remote and host:
@@ -2389,11 +2599,22 @@ class SessionTab(QWidget):
                 self.write_output(f'  登录用户 : {user}\n', 'text-info')
 
         self.write_output(f'  连接时间 : {now}\n', 'text-info')
-        if strategy is not None and hasattr(strategy, 'enable_keepalive'):
+        # 保活状态：明确区分「已应用」「该连接类型不支持」「应用失败」
+        if keepalive_state is None:
+            if keepalive_interval is None:
+                keepalive_interval = self._get_keepalive_interval()
+            keepalive_state, _err = _apply_keepalive_to(
+                strategy, conn_type, keepalive_interval)
+        if keepalive_state == 'unsupported':
+            self.write_output('  保活     : 不支持（该连接类型无保活机制）\n', 'text-hint')
+        elif keepalive_state == 'failed':
+            detail = f"：{keepalive_error}" if keepalive_error else "（详见日志）"
+            self.write_output(f'  保活     : 应用失败{detail}\n', 'text-danger')
+        else:
             if keepalive_interval is None:
                 keepalive_interval = self._get_keepalive_interval()
             keepalive_text = TerminalWidget.format_keepalive(keepalive_interval)
-            self.write_output(f'  保活     : 已开启（间隔 {keepalive_text}）\n', 'text-hint')
+            self.write_output(f'  保活     : 已应用（间隔 {keepalive_text}）\n', 'text-hint')
         self.write_output(bar + '\n', 'text-hint')
 
     def disconnect(self):
@@ -2402,8 +2623,8 @@ class SessionTab(QWidget):
         if self._connection_worker is not None:
             try:
                 self._connection_worker.connected.disconnect()
-            except (TypeError, RuntimeError):
-                pass
+            except (TypeError, RuntimeError) as exc:
+                Logger.get_instance().debug(f"断开连接信号失败（可能已断开）: {exc}")
             self._connection_worker = None
         self.output_timer.stop()
         self.connection_context.disconnect()
@@ -2444,8 +2665,6 @@ class TerminalButtonToolbar(QWidget):
         self._config_manager = config_manager
         self._buttons_data = []
         self._button_widgets = {}  # btn_id → QPushButton
-        self._get_style_fn = None  # 由 TerminalWidget 注入
-        self._get_font_size_fn = None
         self.init_ui()
         self._load_buttons()
         self._build_toolbar()
@@ -2461,6 +2680,11 @@ class TerminalButtonToolbar(QWidget):
             return self._config_manager.get_font_size(key, default)
         return default
 
+    def _get_border_radius(self, key, default='4px'):
+        if self._config_manager:
+            return self._config_manager.get_border_radius(key, default)
+        return default
+
     def _build_button_css(self):
         """生成按钮 CSS（含 executing 属性选择器）"""
         bg_input = self._get_style('bg-input', '#3c3c3c')
@@ -2468,13 +2692,15 @@ class TerminalButtonToolbar(QWidget):
         border_light = self._get_style('border-light', '#5a5a5d')
         text_primary = self._get_style('text', '#ffffff')
         primary = self._get_style('primary', '#3a8fd4')
+        on_primary = _get_on_primary_color(self._config_manager)
         font_size_sm = self._get_font_size('size-sm', '11px')
+        radius_md = self._get_border_radius('md', '6px')
         return f"""
             QPushButton[executing="false"] {{
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
-                border-radius: 6px;
+                border-radius: {radius_md};
                 padding: 4px 12px;
                 font-size: {font_size_sm};
                 font-weight: bold;
@@ -2484,9 +2710,9 @@ class TerminalButtonToolbar(QWidget):
             }}
             QPushButton[executing="true"] {{
                 background-color: {primary};
-                color: #ffffff;
+                color: {on_primary};
                 border: none;
-                border-radius: 6px;
+                border-radius: {radius_md};
                 padding: 4px 12px;
                 font-size: {font_size_sm};
                 font-weight: bold;
@@ -2687,6 +2913,10 @@ class TerminalWidget(QWidget):
         self._log_enabled = False
         self._sidebar_visible = True
         self._quick_conn_data = {}
+        # 视图类设置（字体大小/颜色开关/按钮栏可见性），统一持久化到 terminal_settings
+        self.current_font_size = 11
+        self.color_enabled = True
+        self._button_toolbar_visible = True
         # 连接保活间隔（秒），默认 5 分钟
         self._keepalive_interval = _DEFAULT_KEEPALIVE_INTERVAL
         self._load_terminal_settings()
@@ -2726,17 +2956,35 @@ class TerminalWidget(QWidget):
     # ========== 终端设置持久化 ==========
 
     def _load_terminal_settings(self):
-        """加载终端设置（日志记录、侧边栏、快速连接栏数据）"""
+        """加载终端设置（视图、日志、侧边栏、快速连接栏、保活）"""
         if not self._config_manager:
             return
         data = self._config_manager.get_plugin_data('Terminal', 'terminal_settings')
         if not isinstance(data, dict):
-            return
+            data = {}
         self._log_enabled = bool(data.get('log_enabled', False))
         self._sidebar_visible = bool(data.get('sidebar_visible', True))
         qc = data.get('quick_connect')
         if isinstance(qc, dict):
             self._quick_conn_data = qc
+
+        # 视图类设置：字体大小与颜色开关
+        try:
+            font_size = int(data.get('font_size', 11))
+        except (ValueError, TypeError):
+            font_size = 11
+        self.current_font_size = max(6, min(32, font_size))
+        self.color_enabled = bool(data.get('color_enabled', True))
+
+        # 按钮栏可见性：统一从 terminal_settings 读取；
+        # 旧版本存在 terminal_buttons.visible，作为一次性兼容回退。
+        if 'button_toolbar_visible' in data:
+            self._button_toolbar_visible = bool(data['button_toolbar_visible'])
+        else:
+            legacy = self._config_manager.get_plugin_data('Terminal', 'terminal_buttons')
+            if isinstance(legacy, dict) and 'visible' in legacy:
+                self._button_toolbar_visible = bool(legacy['visible'])
+
         # 保活间隔：兼容旧版本（无配置时默认 5 分钟），并做范围校验
         try:
             interval = int(data.get('keepalive_interval', _DEFAULT_KEEPALIVE_INTERVAL))
@@ -2745,7 +2993,7 @@ class TerminalWidget(QWidget):
             self._keepalive_interval = _DEFAULT_KEEPALIVE_INTERVAL
 
     def _save_terminal_settings(self):
-        """持久化终端设置"""
+        """持久化终端设置（视图类设置与其它终端设置统一存放在此键）"""
         if not self._config_manager:
             return
         data = {
@@ -2753,6 +3001,9 @@ class TerminalWidget(QWidget):
             'sidebar_visible': bool(self._sidebar_visible),
             'quick_connect': self._quick_conn_data,
             'keepalive_interval': int(self._keepalive_interval),
+            'font_size': int(self.current_font_size),
+            'color_enabled': bool(self.color_enabled),
+            'button_toolbar_visible': bool(self._button_toolbar_visible),
         }
         self._config_manager.set_plugin_data('Terminal', 'terminal_settings', data)
         self._config_manager.save_plugin_data('Terminal', 'terminal_settings')
@@ -2781,35 +3032,68 @@ class TerminalWidget(QWidget):
         ("30 分钟", 1800),
     ]
 
-    def set_keepalive_interval(self, seconds):
-        """设置连接保活间隔（秒）并即时应用到所有已连接会话"""
+    @staticmethod
+    def clamp_keepalive_interval(seconds):
+        """把保活间隔限制到允许范围（菜单档位/自定义/持久化共用同一校验）"""
         try:
             seconds = int(seconds)
         except (ValueError, TypeError):
-            seconds = _DEFAULT_KEEPALIVE_INTERVAL
-        seconds = max(_KEEPALIVE_MIN, min(_KEEPALIVE_MAX, seconds))
+            return _DEFAULT_KEEPALIVE_INTERVAL
+        return max(_KEEPALIVE_MIN, min(_KEEPALIVE_MAX, seconds))
+
+    def prompt_custom_keepalive(self):
+        """菜单「自定义…」：弹窗输入保活间隔，复用统一范围校验"""
+        value, ok = QInputDialog.getInt(
+            self, "自定义保活时间",
+            f"保活间隔（秒，{_KEEPALIVE_MIN}–{_KEEPALIVE_MAX}）：",
+            int(self._keepalive_interval),
+            _KEEPALIVE_MIN, _KEEPALIVE_MAX, 10,
+        )
+        if ok:
+            self.set_keepalive_interval(value)
+
+    def _apply_keepalive(self, strategy, conn_type, interval):
+        """对单个连接应用保活（委托给模块级公共实现）"""
+        return _apply_keepalive_to(strategy, conn_type, interval)
+
+    def set_keepalive_interval(self, seconds):
+        """设置连接保活间隔（秒）并即时应用到所有已连接会话
+
+        状态栏区分「已应用」「连接类型不支持」「应用失败」三种结果。
+        """
+        seconds = self.clamp_keepalive_interval(seconds)
         self._keepalive_interval = seconds
         self._save_terminal_settings()
 
-        # 即时应用到所有活动连接（paramiko 可在任意时刻重置 keepalive 定时器）
-        applied = 0
+        applied = unsupported = failed = 0
         for sess in self.sessions.values():
             tab = sess.get('tab')
-            if tab is None:
+            if tab is None or not tab.connection_context.is_connected():
                 continue
+            conn_type = (sess.get('connection') or {}).get('type', '')
             strategy = getattr(tab.connection_context, '_strategy', None)
-            if strategy is not None and tab.connection_context.is_connected() \
-                    and hasattr(strategy, 'enable_keepalive'):
+            state, error = self._apply_keepalive(strategy, conn_type, seconds)
+            if state == 'applied':
+                applied += 1
+            elif state == 'unsupported':
+                unsupported += 1
+            else:
+                failed += 1
                 try:
-                    strategy.enable_keepalive(seconds)
-                    applied += 1
-                except Exception:
-                    pass
+                    tab.write_output(f'保活设置失败: {error}\n', 'text-danger')
+                except Exception as exc:
+                    Logger.get_instance().debug(f"写入保活失败提示失败: {exc}")
 
         if self._plugin_manager_ref and hasattr(self._plugin_manager_ref, 'set_tool_status'):
             tip = f"保活时间已设置为 {self.format_keepalive(seconds)}"
             if applied:
-                tip += f"（已应用到 {applied} 个连接）"
+                tip += f"，已应用到 {applied} 个连接"
+            if unsupported:
+                tip += f"，{unsupported} 个连接类型不支持"
+            if failed:
+                tip += f"，{failed} 个应用失败"
+            if not (applied or unsupported or failed):
+                tip += "（当前无活动连接）"
             self._plugin_manager_ref.set_tool_status('Terminal', tip)
 
     @staticmethod
@@ -2840,15 +3124,13 @@ class TerminalWidget(QWidget):
             return True
 
     def _get_selected_colors(self):
-        """获取选中态颜色：深灰色背景 + 适当对比度文字（不使用蓝色）
+        """获取选中态颜色：统一走主题的 selection / selection-text
 
         Returns:
             (selected_bg, selected_text) 元组
         """
-        if self._is_dark_theme():
-            return '#3c3c3c', '#e0e0e0'  # 深灰色背景 + 浅色文字（高对比度）
-        else:
-            return '#c8c8c8', '#1e1e1e'  # 灰色背景 + 深色文字（高对比度）
+        return (self._get_style('selection', '#264f78'),
+                self._get_style('selection-text', '#ffffff'))
 
     def _connection_list_qss(self):
         """保存链接列表样式（Tabby 风格：圆角条目，无分割线）
@@ -2861,6 +3143,7 @@ class TerminalWidget(QWidget):
         text_primary = self._get_style('text', '#ffffff')
         selected_bg, selected_text = self._get_selected_colors()
         font_size_normal = self._get_font_size('size-md', '12px')
+        radius_sm = self._get_border_radius('sm', '4px')
         return f"""
             QListWidget {{
                 background-color: {bg_main};
@@ -2871,7 +3154,7 @@ class TerminalWidget(QWidget):
             QListWidget::item {{
                 padding: 4px 8px;
                 margin: 1px 4px;
-                border-radius: 4px;
+                border-radius: {radius_sm};
                 font-size: {font_size_normal};
             }}
             QListWidget::item:selected {{
@@ -2898,7 +3181,8 @@ class TerminalWidget(QWidget):
             g = round(g1 + (g2 - g1) * ratio)
             b = round(b1 + (b2 - b1) * ratio)
             return f'#{r:02x}{g:02x}{b:02x}'
-        except Exception:
+        except Exception as exc:
+            Logger.get_instance().debug(f"颜色混合失败（{color1}, {color2}）: {exc}")
             return color1
 
     def _tab_bar_qss(self):
@@ -2914,16 +3198,18 @@ class TerminalWidget(QWidget):
         text_secondary = self._get_style('text-secondary', '#cccccc')
         primary = self._get_style('primary', '#3a8fd4')
         font_size_normal = self._get_font_size('size-md', '12px')
+        radius_md = self._get_border_radius('md', '6px')
+        text_on_primary = self._get_style('selection-text', '#ffffff')
         # 选中标签使用主色底衬 + 主色底边指示条 + 加粗文字，
         # 确保与未选中（bg-tertiary）/悬停态（bg-input）都有明显区分
         if self._is_dark_theme():
             tab_sel_bg = self._blend_hex(bg_tertiary, primary, 0.45)
-            tab_sel_border = self._blend_hex(primary, '#ffffff', 0.3)
-            tab_sel_text = '#ffffff'
+            tab_sel_border = self._blend_hex(primary, text_on_primary, 0.3)
+            tab_sel_text = text_on_primary
         else:
-            tab_sel_bg = self._blend_hex('#ffffff', primary, 0.12)
-            tab_sel_border = self._blend_hex('#ffffff', primary, 0.4)
-            tab_sel_text = '#1e1e1e'
+            tab_sel_bg = self._blend_hex(bg_main, primary, 0.12)
+            tab_sel_border = self._blend_hex(bg_main, primary, 0.4)
+            tab_sel_text = text_primary
 
         return f"""
             QTabWidget::pane {{
@@ -2942,7 +3228,7 @@ class TerminalWidget(QWidget):
                 border-bottom: 2px solid transparent;
                 margin-right: 4px;
                 margin-top: 3px;
-                border-radius: 6px;
+                border-radius: {radius_md};
                 font-size: {font_size_normal};
                 font-weight: 500;
             }}
@@ -3005,22 +3291,28 @@ class TerminalWidget(QWidget):
         """获取统一按钮 CSS 样式（蓝色背景+白色字体+加粗）"""
         if self._config_manager:
             return self._config_manager.get_button_css(button_type)
-        # 默认蓝色背景、白色字体、加粗（淡蓝色，降低对比度）
+        # 回退：使用当前主题色，保持与主题按钮一致
+        primary = self._get_style('primary', '#3a8fd4')
+        primary_hover = self._get_style('primary-hover', '#4a9fe4')
+        primary_pressed = self._get_style('primary-pressed', '#2a7fc4')
+        on_primary = _get_on_primary_color(self._config_manager)
+        radius = self._get_border_radius('md', '6px')
+        font_size = self._get_font_size('size-md', '12px')
         return f"""
             QPushButton {{
-                background-color: #3a8fd4;
-                color: #ffffff;
+                background-color: {primary};
+                color: {on_primary};
                 border: none;
-                border-radius: 6px;
+                border-radius: {radius};
                 padding: 8px 16px;
-                font-size: 12px;
+                font-size: {font_size};
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: #4a9fe4;
+                background-color: {primary_hover};
             }}
             QPushButton:pressed {{
-                background-color: #2a7fc4;
+                background-color: {primary_pressed};
             }}
         """
 
@@ -3122,7 +3414,7 @@ class TerminalWidget(QWidget):
             }}
             QToolButton:hover {{
                 background-color: {bg_input};
-                border-radius: 4px;
+                border-radius: {border_radius};
             }}
         """)
         header_layout.addWidget(self.collapse_sidebar_btn)
@@ -3134,9 +3426,6 @@ class TerminalWidget(QWidget):
         self.connection_list.doubleClicked.connect(self.on_connection_double_click)
         self.connection_list.setStyleSheet(self._connection_list_qss())
         sidebar_layout.addWidget(self.connection_list)
-
-        self.current_font_size = 11
-        self.color_enabled = True
 
         self.right_panel = QWidget()
         right_layout = QVBoxLayout(self.right_panel)
@@ -3169,7 +3458,6 @@ class TerminalWidget(QWidget):
         self._init_quick_connect_bar(right_layout, unified_btn_css)
 
         # 底部自定义按钮工具栏（与输出框作为一个整体，宽度对齐）
-        self._button_toolbar_visible = True
         self.button_toolbar = TerminalButtonToolbar(self._config_manager, self)
         self.button_toolbar.button_triggered.connect(self._execute_button)
         self._load_button_toolbar_visible()
@@ -3197,7 +3485,7 @@ class TerminalWidget(QWidget):
             }}
             QToolButton:hover {{
                 background-color: {bg_input};
-                border-radius: 4px;
+                border-radius: {border_radius};
             }}
         """)
         expand_layout.addWidget(self.expand_sidebar_btn)
@@ -3230,6 +3518,7 @@ class TerminalWidget(QWidget):
         text_primary = self._get_style('text', '#ffffff')
         primary = self._get_style('primary', '#007acc')
         font_size_medium = self._get_font_size('size-lg', '13px')
+        welcome_font_size = self._get_font_size('size-xxl', '16px')
         
         self.empty_page = QWidget()
         self.empty_page.setStyleSheet(f"background-color: {bg_secondary};")
@@ -3241,7 +3530,7 @@ class TerminalWidget(QWidget):
         welcome_label.setStyleSheet(f"""
             QLabel {{
                 color: {text_primary};
-                font-size: 18px;
+                font-size: {welcome_font_size};
                 font-weight: bold;
             }}
         """)
@@ -3317,16 +3606,18 @@ class TerminalWidget(QWidget):
         text_primary = self._get_style('text', '#ffffff')
         text_secondary = self._get_style('text-secondary', '#cccccc')
         font_size_md = self._get_font_size('size-md', '12px')
+        font_size_lg = self._get_font_size('size-lg', '13px')
+        radius_md = self._get_border_radius('md', '6px')
 
         panel.setStyleSheet(f"""
             QFrame#welcome_shortcut_panel {{
                 background-color: {bg};
                 border: 1px solid {border};
-                border-radius: 6px;
+                border-radius: {radius_md};
             }}
             QLabel#welcome_shortcut_title {{
                 color: {text_primary};
-                font-size: 13px;
+                font-size: {font_size_lg};
                 font-weight: bold;
                 background: transparent;
             }}
@@ -3367,7 +3658,11 @@ class TerminalWidget(QWidget):
         bg_input_focus = self._get_style('bg-input-focus', '#4c4c4c')
         bg_tertiary = self._get_style('bg-tertiary', '#2d2d30')
         selection = self._get_style('selection', '#007acc')
+        selection_text = self._get_style('selection-text', '#ffffff')
+        on_primary = _get_on_primary_color(self._config_manager)
         font_size_normal = self._get_font_size('size-md', '12px')
+        radius_sm = self._get_border_radius('sm', '4px')
+        radius_md = self._get_border_radius('md', '6px')
         return f"""
             QWidget#quick_bar {{
                 background-color: {bg_bar};
@@ -3384,7 +3679,7 @@ class TerminalWidget(QWidget):
                 color: {text_primary};
                 border: 1px solid {border_light};
                 padding: 3px 8px;
-                border-radius: 6px;
+                border-radius: {radius_md};
                 font-size: {font_size_normal};
                 min-height: 22px;
             }}
@@ -3398,15 +3693,15 @@ class TerminalWidget(QWidget):
                 background-color: {bg_tertiary};
                 color: {text_primary};
                 selection-background-color: {selection};
-                selection-color: #ffffff;
+                selection-color: {selection_text};
                 border: 1px solid {border_light};
-                border-radius: 4px;
+                border-radius: {radius_sm};
             }}
             QPushButton#qc_save_btn {{
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
-                border-radius: 6px;
+                border-radius: {radius_md};
                 padding: 5px 14px;
                 font-size: {font_size_normal};
                 font-weight: bold;
@@ -3420,9 +3715,9 @@ class TerminalWidget(QWidget):
             }}
             QPushButton#qc_connect_btn {{
                 background-color: {self._get_style('primary', '#3a8fd4')};
-                color: #ffffff;
+                color: {on_primary};
                 border: none;
-                border-radius: 6px;
+                border-radius: {radius_md};
                 padding: 5px 18px;
                 font-size: {font_size_normal};
                 font-weight: bold;
@@ -3433,14 +3728,14 @@ class TerminalWidget(QWidget):
             QPushButton#qc_connect_btn:pressed {{
                 background-color: {self._get_style('primary-pressed', '#2a7fc4')};
             }}
-            QPushButton#qc_key_browse_btn {{
+            QPushButton#qc_key_browse_btn, QPushButton#qc_serial_refresh_btn {{
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
-                border-radius: 6px;
+                border-radius: {radius_md};
                 font-size: {font_size_normal};
             }}
-            QPushButton#qc_key_browse_btn:hover {{
+            QPushButton#qc_key_browse_btn:hover, QPushButton#qc_serial_refresh_btn:hover {{
                 border-color: {border_focus};
                 background-color: {bg_input_focus};
             }}
@@ -3518,16 +3813,21 @@ class TerminalWidget(QWidget):
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(6)
         self.qc_serial_combo = QComboBox()
-        self.qc_serial_combo.setEditable(True)
-        self.qc_serial_combo.addItems([f'COM{i}' for i in range(1, 21)])
         self.qc_serial_combo.setMinimumWidth(130)
-        sl.addWidget(self.qc_serial_combo, 1)
-        sl.addWidget(QLabel("波特率"))
         self.qc_baud_combo = QComboBox()
-        self.qc_baud_combo.setEditable(True)
-        self.qc_baud_combo.addItems(["9600", "19200", "38400", "57600", "115200"])
-        self.qc_baud_combo.setCurrentText("115200")
         self.qc_baud_combo.setFixedWidth(96)
+        # 与新建/编辑连接对话框共用同一套可编辑控件与候选值
+        _configure_serial_combos(self.qc_serial_combo, self.qc_baud_combo)
+        sl.addWidget(self.qc_serial_combo, 1)
+        # 重新枚举本机串口（与协议工具一致的刷新入口）
+        self.qc_serial_refresh_btn = QPushButton("刷新")
+        self.qc_serial_refresh_btn.setObjectName("qc_serial_refresh_btn")
+        self.qc_serial_refresh_btn.setFixedWidth(46)
+        self.qc_serial_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.qc_serial_refresh_btn.setToolTip("重新枚举本机串口")
+        self.qc_serial_refresh_btn.clicked.connect(self._refresh_quick_serial_ports)
+        sl.addWidget(self.qc_serial_refresh_btn)
+        sl.addWidget(QLabel("波特率"))
         sl.addWidget(self.qc_baud_combo)
         sl.addStretch()
 
@@ -3573,9 +3873,18 @@ class TerminalWidget(QWidget):
             self.qc_port_input.setValue(22)
         elif conn_type == "telnet":
             self.qc_port_input.setValue(23)
-        # 密钥文件仅 SSH 使用
+        # 字段可见性由统一字段表决定，保证快速栏与编辑对话框一致
+        fields = _connection_fields(conn_type)
+        if hasattr(self, 'qc_user_input'):
+            self.qc_user_input.setVisible('username' in fields)
+        if hasattr(self, 'qc_password_input'):
+            self.qc_password_input.setVisible('password' in fields)
         if hasattr(self, 'qc_keyfile_widget'):
-            self.qc_keyfile_widget.setVisible(conn_type == "ssh")
+            self.qc_keyfile_widget.setVisible('key_file' in fields)
+
+    def _refresh_quick_serial_ports(self):
+        """快速连接栏：重新枚举本机串口（保留当前输入）"""
+        _reload_serial_ports(self.qc_serial_combo)
 
     def _browse_quick_key_file(self):
         """快速连接栏：浏览选择 SSH 密钥文件"""
@@ -3615,63 +3924,45 @@ class TerminalWidget(QWidget):
             port = int(data.get('port', 0))
             if 1 <= port <= 65535:
                 self.qc_port_input.setValue(port)
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as exc:
+            Logger.get_instance().debug(f"恢复快速连接端口失败: {exc}")
         self.qc_user_input.setText(data.get('username', ''))
         self.qc_password_input.setText(data.get('password', ''))
         self.qc_keyfile_input.setText(data.get('key_file', ''))
         if data.get('serial_port'):
-            self.qc_serial_combo.setCurrentText(data['serial_port'])
+            _set_combo_text(self.qc_serial_combo, data['serial_port'])
         if data.get('baud'):
-            self.qc_baud_combo.setCurrentText(str(data['baud']))
+            _set_combo_text(self.qc_baud_combo, data['baud'])
 
     def _build_quick_conn(self):
         """校验快速连接栏内容并构造连接配置（结构与已保存连接一致）
 
         校验失败时弹出提示并返回 None；供「连接」和「保存」按钮复用，
-        保证保存下来的连接下次可以直接连接。
+        保证保存下来的连接下次可以直接连接。校验逻辑与新建/编辑连接
+        对话框共用 _normalize_connection_values，避免两个入口行为不一致。
         """
         conn_type = self.qc_type_combo.currentText()
-        if conn_type == 'serial':
-            serial_port = self.qc_serial_combo.currentText().strip()
-            if not serial_port:
-                QMessageBox.warning(self, "提示", "请填写串口号")
-                return None
-            try:
-                baud = int(self.qc_baud_combo.currentText().strip() or '115200')
-            except ValueError:
-                baud = 115200
-            return {
-                'name': serial_port,
-                'type': 'serial',
-                'config': {'port': serial_port, 'baud': baud},
-            }
-        host = self.qc_host_input.text().strip()
-        if not host:
-            QMessageBox.warning(self, "提示", "请填写主机地址")
-            self.qc_host_input.setFocus()
+        conn, error, focus_field = _normalize_connection_values(
+            conn_type,
+            host=self.qc_host_input.text(),
+            port=self.qc_port_input.value(),
+            username=self.qc_user_input.text(),
+            password=self.qc_password_input.text(),
+            key_file=self.qc_keyfile_input.text(),
+            serial_port=self.qc_serial_combo.currentText(),
+            baud=self.qc_baud_combo.currentText(),
+        )
+        if conn is None:
+            QMessageBox.warning(self, "提示", error)
+            focus_widget = {
+                'serial_port': getattr(self, 'qc_serial_combo', None),
+                'host': getattr(self, 'qc_host_input', None),
+                'password': getattr(self, 'qc_password_input', None),
+            }.get(focus_field)
+            if focus_widget is not None:
+                focus_widget.setFocus()
             return None
-        password = self.qc_password_input.text()
-        key_file = self.qc_keyfile_input.text().strip()
-        # SSH：密码与密钥文件任一存在即可
-        if conn_type == 'ssh' and not password and not key_file:
-            QMessageBox.warning(self, "提示", "请填写密码或选择密钥文件")
-            self.qc_password_input.setFocus()
-            return None
-        port = self.qc_port_input.value()
-        config = {
-            'host': host,
-            'port': port,
-            'username': self.qc_user_input.text().strip(),
-            'password': password,
-        }
-        if conn_type == 'ssh':
-            config['key_file'] = key_file
-        return {
-            'name': host,
-            'type': conn_type,
-            'config': config,
-        }
+        return conn
 
     def _do_quick_connect(self):
         """使用快速连接栏的配置发起连接（连接后保留配置）"""
@@ -3857,13 +4148,14 @@ class TerminalWidget(QWidget):
             color = self._get_style('text', '#ffffff')
             border = self._get_style('border-light', '#4a4a4d')
             selected = self._get_style('primary', '#3a8fd4')
+            selected_text = self._get_style('selection-text', '#ffffff')
             menu.setStyleSheet(f"""
                 QMenu {{
                     background-color: {bg}; color: {color};
                     border: 1px solid {border}; padding: 4px;
                 }}
                 QMenu::item {{ padding: 6px 24px; min-width: 120px; color: {color}; }}
-                QMenu::item:selected {{ background-color: {selected}; color: #ffffff; }}
+                QMenu::item:selected {{ background-color: {selected}; color: {selected_text}; }}
             """)
         return menu
 
@@ -3926,6 +4218,22 @@ class TerminalWidget(QWidget):
         self._sidebar_visible = bool(visible)
         self._save_terminal_settings()
 
+    def _apply_view_settings(self, tab):
+        """把当前视图设置（字体大小 / 颜色开关）应用到指定会话
+
+        创建会话与主题刷新都走这里，保证两条路径读取同一份持久化设置。
+        """
+        if tab is None:
+            return
+        try:
+            safe_size = max(1, int(self.current_font_size))
+        except (ValueError, TypeError):
+            safe_size = 11
+        if hasattr(tab, 'terminal_display'):
+            tab.terminal_display.setFont(QFont("Consolas", safe_size))
+        if hasattr(tab, 'ansi_parser'):
+            tab.ansi_parser.enable_color = bool(self.color_enabled)
+
     def create_session(self, conn):
         """创建新会话"""
         self.session_counter += 1
@@ -3942,14 +4250,19 @@ class TerminalWidget(QWidget):
         # 创建会话标签
         tab = SessionTab(session_id, conn.get('name', '会话'), self._color_scheme, self._config_manager)
 
-        # 同步颜色显示开关状态到新会话的ANSI解析器
-        tab.ansi_parser.enable_color = getattr(self, 'color_enabled', True)
+        # 应用持久化的视图设置（字体大小 / 颜色显示开关）
+        # 视图设置失败不应阻断会话创建，记录日志后继续
+        try:
+            self._apply_view_settings(tab)
+        except Exception as exc:
+            Logger.get_instance().error(
+                f"应用会话视图设置失败: {exc}", exc_info=True)
         # 同步日志记录开关（文件在 connect_with_config 时创建）
-        tab.set_logging(getattr(self, '_log_enabled', False))
-
-        # 设置初始字体大小，clamp到>0避免setPointSize(-1)警告
-        safe_size = max(1, int(self.current_font_size)) if self.current_font_size and isinstance(self.current_font_size, (int, float)) else 11
-        tab.terminal_display.setFont(QFont("Consolas", safe_size))
+        try:
+            tab.set_logging(getattr(self, '_log_enabled', False))
+        except Exception as exc:
+            Logger.get_instance().error(
+                f"同步会话日志开关失败: {exc}", exc_info=True)
         
         # 标签只显示名称，没有名称则显示IP
         conn_name = conn.get('name', '')
@@ -4049,25 +4362,15 @@ class TerminalWidget(QWidget):
     # ========== 按钮工具栏执行 ==========
 
     def _load_button_toolbar_visible(self):
-        """从配置加载按钮工具栏可见性"""
-        if self._config_manager:
-            data = self._config_manager.get_plugin_data('Terminal', 'terminal_buttons')
-            if isinstance(data, dict):
-                self._button_toolbar_visible = data.get('visible', True)
+        """应用按钮工具栏可见性（值已统一由 terminal_settings 加载）"""
         self.button_toolbar.setVisible(self._button_toolbar_visible)
 
     def toggle_button_toolbar(self, visible):
         """切换按钮工具栏显示/隐藏（由菜单触发）"""
         self._button_toolbar_visible = visible
         self.button_toolbar.setVisible(visible)
-        # 持久化（保留 buttons 数据）
-        if self._config_manager:
-            data = self._config_manager.get_plugin_data('Terminal', 'terminal_buttons') or {}
-            if not isinstance(data, dict):
-                data = {}
-            data['visible'] = visible
-            self._config_manager.set_plugin_data('Terminal', 'terminal_buttons', data)
-            self._config_manager.save_plugin_data('Terminal', 'terminal_buttons')
+        # 可见性统一持久化到 terminal_settings，不再单写 terminal_buttons
+        self._save_terminal_settings()
 
     def _execute_button(self, btn_id):
         """按钮触发执行入口（主线程）"""
@@ -4180,6 +4483,8 @@ class TerminalWidget(QWidget):
         font_size = self._get_font_size('size-lg', '13px')
         font_size_normal = self._get_font_size('size-md', '12px')
         font_size_sm = self._get_font_size('size-sm', '11px')
+        welcome_font_size = self._get_font_size('size-xxl', '16px')
+        radius_sm = self._get_border_radius('sm', '4px')
 
         # 刷新侧边栏整体背景
         if hasattr(self, 'sidebar'):
@@ -4211,7 +4516,7 @@ class TerminalWidget(QWidget):
                 }}
                 QToolButton:hover {{
                     background-color: {bg_input};
-                    border-radius: 4px;
+                    border-radius: {radius_sm};
                 }}
             """)
 
@@ -4227,7 +4532,7 @@ class TerminalWidget(QWidget):
                 }}
                 QToolButton:hover {{
                     background-color: {bg_input};
-                    border-radius: 4px;
+                    border-radius: {radius_sm};
                 }}
             """)
 
@@ -4257,7 +4562,7 @@ class TerminalWidget(QWidget):
                     label.setStyleSheet(f"""
                         QLabel {{
                             color: {text_primary};
-                            font-size: 18px;
+                            font-size: {welcome_font_size};
                             font-weight: bold;
                         }}
                     """)
@@ -4287,21 +4592,33 @@ class TerminalWidget(QWidget):
         if hasattr(self, 'session_tabs'):
             self.session_tabs.setStyleSheet(self._tab_bar_qss())
 
-        # 刷新SessionTab内部样式
+        # 刷新SessionTab内部样式：单个会话失败只记录日志，不中断整体刷新
         new_scheme = self._get_color_scheme()
         for sid, sess in self.sessions.items():
             tab = sess.get('tab')
-            if tab:
-                tab._color_scheme = new_scheme
-                if hasattr(tab, 'refresh_theme_styles'):
-                    try:
-                        tab.refresh_theme_styles()
-                    except Exception:
-                        pass
+            if not tab:
+                continue
+            tab._color_scheme = new_scheme
+            # 主题刷新同样复用持久化的视图设置（字体大小 / 颜色开关）
+            try:
+                self._apply_view_settings(tab)
+            except Exception as exc:
+                Logger.get_instance().error(
+                    f"刷新会话 {sid} 视图设置失败: {exc}", exc_info=True)
+            if hasattr(tab, 'refresh_theme_styles'):
+                try:
+                    tab.refresh_theme_styles()
+                except Exception as exc:
+                    Logger.get_instance().error(
+                        f"刷新会话 {sid} 主题样式失败: {exc}", exc_info=True)
 
         # 刷新按钮工具栏样式
         if hasattr(self, 'button_toolbar'):
-            self.button_toolbar.refresh_theme_styles()
+            try:
+                self.button_toolbar.refresh_theme_styles()
+            except Exception as exc:
+                Logger.get_instance().error(
+                    f"刷新按钮工具栏样式失败: {exc}", exc_info=True)
 
     def load_connections(self):
         """加载连接列表（默认按连接名称不区分大小写排序）"""
@@ -4365,64 +4682,6 @@ class TerminalWidget(QWidget):
         dialog = SFTPDialog(session.connection_context, self, config_manager=self._config_manager)
         dialog.exec()
 
-    def show_font_size_menu(self):
-        """显示字体大小设置菜单"""
-        menu = QMenu(self)
-        
-        if self._config_manager:
-            menu.setStyleSheet(self._config_manager.get_menu_css())
-        else:
-            bg = self._get_style('bg-tertiary', '#2d2d30')
-            color = self._get_style('text', '#ffffff')
-            border = self._get_style('border-light', '#4a4a4d')
-            padding = self._get_style('menu_padding', '4px')
-            item_padding = self._get_style('menu_item_padding', '6px 24px')
-            item_selected_bg = self._get_style('primary', '#007acc')
-            separator_bg = self._get_style('border-light', '#4a4a4d')
-            
-            menu.setStyleSheet(f"""
-                QMenu {{
-                    background-color: {bg};
-                    color: {color};
-                    border: 1px solid {border};
-                    padding: {padding};
-                }}
-                QMenu::item {{
-                    padding: {item_padding};
-                    min-width: 100px;
-                    color: {color};
-                }}
-                QMenu::item:selected {{
-                    background-color: {item_selected_bg};
-                    color: #ffffff;
-                }}
-                QMenu::separator {{
-                    height: 1px;
-                    background-color: {separator_bg};
-                    margin: 4px 0;
-                }}
-            """)
-        
-        font_sizes = [
-            ("8px", 8),
-            ("10px", 10),
-            ("11px", 11),
-            ("12px", 12),
-            ("14px", 14),
-            ("16px", 16),
-            ("18px", 18),
-            ("20px", 20)
-        ]
-        
-        for label, size in font_sizes:
-            action = QAction(label, self)
-            action.setCheckable(True)
-            action.setChecked(self.current_font_size == size)
-            action.triggered.connect(lambda checked, s=size: self.set_font_size(s))
-            menu.addAction(action)
-        
-        menu.exec(QCursor.pos())
-
     def set_font_size(self, size):
         """设置字体大小"""
         # 验证size合法性，确保>0避免setPointSize(-1)警告
@@ -4435,6 +4694,8 @@ class TerminalWidget(QWidget):
             session = session_data.get('tab')
             if session and hasattr(session, 'terminal_display'):
                 session.terminal_display.setFont(QFont("Consolas", safe_size))
+        # 字体大小属于视图设置，设一次即持久化
+        self._save_terminal_settings()
 
     def toggle_color_display(self, checked=None):
         """切换颜色显示开关（支持菜单勾选触发）"""
@@ -4452,6 +4713,8 @@ class TerminalWidget(QWidget):
                 # 重新渲染已输出内容，使开关变更立即生效
                 if hasattr(session, '_rerender_output'):
                     session._rerender_output()
+        # 颜色显示开关属于视图设置，设一次即持久化
+        self._save_terminal_settings()
 
     def show_connection_menu(self, pos):
         """显示连接右键菜单"""
@@ -4471,9 +4734,8 @@ class TerminalWidget(QWidget):
             bg = self._get_style('bg-tertiary', '#2d2d30')
             color = self._get_style('text', '#ffffff')
             border = self._get_style('border-light', '#4a4a4d')
-            padding = self._get_style('menu_padding', '4px')
-            item_padding = self._get_style('menu_item_padding', '6px 24px')
             item_selected_bg = self._get_style('primary', '#007acc')
+            item_selected_color = self._get_style('selection-text', '#ffffff')
             separator_bg = self._get_style('border-light', '#4a4a4d')
             
             menu.setStyleSheet(f"""
@@ -4481,16 +4743,16 @@ class TerminalWidget(QWidget):
                     background-color: {bg};
                     color: {color};
                     border: 1px solid {border};
-                    padding: {padding};
+                    padding: 4px;
                 }}
                 QMenu::item {{
-                    padding: {item_padding};
+                    padding: 6px 24px;
                     min-width: 100px;
                     color: {color};
                 }}
                 QMenu::item:selected {{
                     background-color: {item_selected_bg};
-                    color: #ffffff;
+                    color: {item_selected_color};
                 }}
                 QMenu::separator {{
                     height: 1px;
@@ -4585,6 +4847,8 @@ class ConnectionDialog(QDialog):
         self.connection = connection
         self._config_manager = config_manager
         self._color_scheme = self._get_parent_color_scheme(parent)
+        # 确定时写入的校验结果，供 get_connection_data 返回
+        self._validated_data = None
         self.init_ui()
 
     def _get_parent_color_scheme(self, parent):
@@ -4667,6 +4931,7 @@ class ConnectionDialog(QDialog):
         primary_pressed = self._get_style('primary-pressed', '#004575')
         selection = self._get_style('selection', '#007acc')
         selection_text = self._get_style('selection-text', '#ffffff')
+        on_primary = _get_on_primary_color(self._config_manager)
         font_size_normal = self._get_font_size('size-md', '12px')
         font_size_medium = self._get_font_size('size-lg', '13px')
         border_radius_small = self._get_border_radius('sm', '4px')
@@ -4705,6 +4970,12 @@ class ConnectionDialog(QDialog):
                 border-color: {border_focus};
                 background-color: {bg_input_focus};
             }}
+            /* 端口输入框统一为无按钮；即使启用按钮也不显示原生浅色箭头 */
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 0px;
+                border: none;
+                background: transparent;
+            }}
             QComboBox {{
                 background-color: {bg_input};
                 color: {text_primary};
@@ -4715,6 +4986,10 @@ class ConnectionDialog(QDialog):
             }}
             QComboBox:hover {{
                 border-color: {border_focus};
+                background-color: {bg_input_focus};
+            }}
+            QComboBox:focus {{
+                border: 1px solid {border_focus};
                 background-color: {bg_input_focus};
             }}
             QComboBox::drop-down {{
@@ -4734,7 +5009,7 @@ class ConnectionDialog(QDialog):
             }}
             QPushButton {{
                 background-color: {primary};
-                color: #ffffff;
+                color: {on_primary};
                 border: none;
                 padding: 6px 18px;
                 font-size: {font_size_medium};
@@ -4747,6 +5022,22 @@ class ConnectionDialog(QDialog):
             QPushButton:pressed {{
                 background-color: {primary_pressed};
             }}
+            QPushButton#secondary_btn {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
+                padding: 6px 12px;
+                font-size: {font_size_medium};
+                font-weight: normal;
+                border-radius: {border_radius_normal};
+            }}
+            QPushButton#secondary_btn:hover {{
+                background-color: {bg_input_focus};
+                border-color: {border_focus};
+            }}
+            QPushButton#secondary_btn:pressed {{
+                background-color: {bg_tertiary};
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -4758,10 +5049,7 @@ class ConnectionDialog(QDialog):
         # 连接名称
         name_layout = QHBoxLayout()
         name_layout.setSpacing(6)
-        name_label = QLabel("连接名称:")
-        name_label.setStyleSheet(label_style)
-        name_label.setFixedWidth(80)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label = _make_form_label("连接名称:", label_style)
         name_layout.addWidget(name_label)
         self.name_input = QLineEdit()
         if self.connection:
@@ -4772,10 +5060,7 @@ class ConnectionDialog(QDialog):
         # 连接类型 + 端口（同一行，1:1比例）
         self.type_port_layout = QHBoxLayout()
         self.type_port_layout.setSpacing(6)
-        type_label = QLabel("连接类型:")
-        type_label.setStyleSheet(label_style)
-        type_label.setFixedWidth(80)
-        type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        type_label = _make_form_label("连接类型:", label_style)
         self.type_port_layout.addWidget(type_label)
         self.type_combo = QComboBox()
         self.type_combo.addItems(["ssh", "telnet", "serial"])
@@ -4784,14 +5069,13 @@ class ConnectionDialog(QDialog):
         self.type_combo.currentTextChanged.connect(self.on_type_changed)
         self.type_port_layout.addWidget(self.type_combo, 1)
 
-        self.port_label = QLabel("端口:")
-        self.port_label.setStyleSheet(label_style)
-        self.port_label.setFixedWidth(80)
-        self.port_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.port_label = _make_form_label("端口:", label_style)
         self.type_port_layout.addWidget(self.port_label)
         self.port_input = QSpinBox()
         self.port_input.setRange(1, 65535)
         self.port_input.setValue(22)
+        # 与快速连接栏统一：隐藏上下箭头，避免深色主题下露出浅色原生箭头
+        self.port_input.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.type_port_layout.addWidget(self.port_input, 1)
         layout.addLayout(self.type_port_layout)
 
@@ -4820,28 +5104,19 @@ class ConnectionDialog(QDialog):
         self.key_file_input = QLineEdit()
         self.key_file_input.setPlaceholderText("密钥文件路径")
         self.key_browse_btn = QPushButton("浏览...")
+        self.key_browse_btn.setObjectName("secondary_btn")
         self.key_browse_btn.setFixedWidth(56)
         self.key_browse_btn.clicked.connect(self.browse_key_file)
-        self.key_browse_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {primary};
-                color: #ffffff;
-                border: none;
-                padding: 4px 6px;
-                font-size: {font_size_normal};
-                font-weight: normal;
-                border-radius: {border_radius_normal};
-            }}
-            QPushButton:hover {{ background-color: {primary_hover}; }}
-            QPushButton:pressed {{ background-color: {primary_pressed}; }}
-        """)
 
         self.serial_port_combo = QComboBox()
-        self.serial_port_combo.addItems([f'COM{i}' for i in range(1, 21)])
-
         self.serial_baud_combo = QComboBox()
-        self.serial_baud_combo.addItems(["9600", "19200", "38400", "57600", "115200"])
-        self.serial_baud_combo.setCurrentText("115200")
+        # 与快速连接栏共用同一套可编辑控件与候选值（COM30/256000 等可原样保存）
+        _configure_serial_combos(self.serial_port_combo, self.serial_baud_combo)
+        self.serial_refresh_btn = QPushButton("刷新")
+        self.serial_refresh_btn.setObjectName("secondary_btn")
+        self.serial_refresh_btn.setFixedWidth(56)
+        self.serial_refresh_btn.setToolTip("重新枚举本机串口")
+        self.serial_refresh_btn.clicked.connect(self._refresh_serial_ports)
 
         # 按钮区
         btn_layout = QHBoxLayout()
@@ -4849,6 +5124,7 @@ class ConnectionDialog(QDialog):
         btn_layout.addStretch()
         ok_btn = QPushButton("确定")
         cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("secondary_btn")
         ok_btn.clicked.connect(self.accept)
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(ok_btn)
@@ -4868,7 +5144,8 @@ class ConnectionDialog(QDialog):
         # 预创建的输入控件清单：重新挂回对话框，避免被行容器连带删除
         protected = [self.host_input, self.username_input, self.password_input,
                      self.key_file_input, self.key_browse_btn,
-                     self.serial_port_combo, self.serial_baud_combo]
+                     self.serial_port_combo, self.serial_baud_combo,
+                     self.serial_refresh_btn]
         while self.config_layout.count():
             item = self.config_layout.takeAt(0)
             w = item.widget()
@@ -4878,16 +5155,15 @@ class ConnectionDialog(QDialog):
                         child.setParent(self)
                 w.deleteLater()
 
-    def _make_row(self, label_text, field_widget, label_width=80):
+    def _make_row(self, label_text, field_widget, label_width=_FORM_LABEL_WIDTH):
         """创建一个横向 标签+字段 行 widget"""
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
-        lbl = QLabel(label_text)
-        lbl.setStyleSheet(self._label_style)
-        lbl.setFixedWidth(label_width)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl = _make_form_label(label_text, self._label_style)
+        if label_width != _FORM_LABEL_WIDTH:
+            lbl.setFixedWidth(label_width)
         row_layout.addWidget(lbl)
         # 重新设置 field_widget 的父对象为当前行，避免跨容器引用
         field_widget.setParent(row_widget)
@@ -4900,10 +5176,7 @@ class ConnectionDialog(QDialog):
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
-        lbl = QLabel("密钥文件:")
-        lbl.setStyleSheet(self._label_style)
-        lbl.setFixedWidth(80)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl = _make_form_label("密钥文件:", self._label_style)
         row_layout.addWidget(lbl)
         self.key_file_input.setParent(row_widget)
         row_layout.addWidget(self.key_file_input, 1)
@@ -4924,7 +5197,7 @@ class ConnectionDialog(QDialog):
 
         if conn_type == "serial":
             # 串口：显示串口、波特率；隐藏主机/端口/用户名/密码
-            self.config_layout.addWidget(self._make_row("串口:", self.serial_port_combo))
+            self.config_layout.addWidget(self._make_serial_row())
             self.config_layout.addWidget(self._make_row("波特率:", self.serial_baud_combo))
             # 端口行不适用于串口，隐藏端口标签和输入框
             self.port_label.hide()
@@ -4932,22 +5205,38 @@ class ConnectionDialog(QDialog):
             # 连接类型下拉框填充满整行（端口已隐藏）
             self.type_port_layout.setStretchFactor(self.type_combo, 1)
         else:
-            # ssh/telnet：显示主机、用户名
+            # 字段集由统一字段表决定，与快速连接栏保持一致
+            fields = _connection_fields(conn_type)
             self.config_layout.addWidget(self._make_row("主机:", self.host_input))
-            self.config_layout.addWidget(self._make_row("用户名:", self.username_input))
-
-            if conn_type == "ssh":
-                # SSH：显示密码 + 密钥文件
+            if 'username' in fields:
+                self.config_layout.addWidget(self._make_row("用户名:", self.username_input))
+            if 'password' in fields:
+                # Telnet 连接时也会发送密码，对话框必须能看到并修改
                 self.config_layout.addWidget(self._make_row("密码:", self.password_input))
+            if 'key_file' in fields:
                 self.config_layout.addWidget(self._make_key_file_row())
-            elif conn_type == "telnet":
-                # Telnet：不显示密码和密钥文件（telnet 无加密认证）
-                pass
 
             # 显示端口标签和控件（ssh/telnet 使用端口），连接类型与端口 1:1 比例
             self.port_label.show()
             self.port_input.show()
             self.type_port_layout.setStretchFactor(self.type_combo, 1)
+
+    def _make_serial_row(self):
+        """创建串口行（可编辑下拉 + 刷新按钮）"""
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        row_layout.addWidget(_make_form_label("串口:", self._label_style))
+        self.serial_port_combo.setParent(row_widget)
+        row_layout.addWidget(self.serial_port_combo, 1)
+        self.serial_refresh_btn.setParent(row_widget)
+        row_layout.addWidget(self.serial_refresh_btn)
+        return row_widget
+
+    def _refresh_serial_ports(self):
+        """重新枚举本机串口（保留当前输入）"""
+        _reload_serial_ports(self.serial_port_combo)
 
     def load_connection_config(self):
         """加载现有连接配置"""
@@ -4966,8 +5255,8 @@ class ConnectionDialog(QDialog):
             self.username_input.setText(config.get('username', ''))
             self.password_input.setText(config.get('password', ''))
         elif conn_type == "serial":
-            self.serial_port_combo.setCurrentText(config.get('port', 'COM1'))
-            self.serial_baud_combo.setCurrentText(str(config.get('baud', 115200)))
+            _set_combo_text(self.serial_port_combo, config.get('port', 'COM1'))
+            _set_combo_text(self.serial_baud_combo, config.get('baud', 115200))
 
     def browse_key_file(self):
         """浏览选择密钥文件"""
@@ -4981,36 +5270,42 @@ class ConnectionDialog(QDialog):
         if file_path:
             self.key_file_input.setText(file_path)
 
+    def _build_conn_data(self):
+        """按当前控件值校验并规范化连接数据（与快速连接栏共用同一套规则）"""
+        return _normalize_connection_values(
+            self.type_combo.currentText(),
+            host=self.host_input.text(),
+            port=self.port_input.value(),
+            username=self.username_input.text(),
+            password=self.password_input.text(),
+            key_file=self.key_file_input.text(),
+            serial_port=self.serial_port_combo.currentText(),
+            baud=self.serial_baud_combo.currentText(),
+            name=self.name_input.text(),
+        )
+
+    def accept(self):
+        """确定：校验通过才关闭对话框，避免保存出无法连接的条目"""
+        conn_data, error, focus_field = self._build_conn_data()
+        if conn_data is None:
+            QMessageBox.warning(self, "提示", error)
+            focus_widget = {
+                'serial_port': getattr(self, 'serial_port_combo', None),
+                'host': getattr(self, 'host_input', None),
+                'password': getattr(self, 'password_input', None),
+            }.get(focus_field)
+            if focus_widget is not None:
+                focus_widget.setFocus()
+            return
+        self._validated_data = conn_data
+        super().accept()
+
     def get_connection_data(self):
-        """获取连接数据"""
-        conn_type = self.type_combo.currentText()
-
-        if conn_type == "ssh":
-            config = {
-                'host': self.host_input.text(),
-                'port': self.port_input.value(),
-                'username': self.username_input.text(),
-                'password': self.password_input.text(),
-                'key_file': self.key_file_input.text()
-            }
-        elif conn_type == "telnet":
-            config = {
-                'host': self.host_input.text(),
-                'port': self.port_input.value(),
-                'username': self.username_input.text(),
-                'password': self.password_input.text()
-            }
-        else:
-            config = {
-                'port': self.serial_port_combo.currentText(),
-                'baud': int(self.serial_baud_combo.currentText())
-            }
-
-        return {
-            'name': self.name_input.text(),
-            'type': conn_type,
-            'config': config
-        }
+        """获取连接数据（返回校验并规范化后的结果）"""
+        if self._validated_data is not None:
+            return self._validated_data
+        conn_data, _error, _focus = self._build_conn_data()
+        return conn_data
 
 
 class SFTPDialog(QDialog):
@@ -5031,7 +5326,9 @@ class SFTPDialog(QDialog):
         # 延迟初始化SFTP连接：先显示弹窗，再异步建立连接，避免启动卡顿
         text_hint = self._get_style('text-hint', '#858585')
         self.status_label.setText("SFTP状态: 正在连接...")
-        self.status_label.setStyleSheet(f"color: {text_hint}; font-weight: bold; font-size: 13px;")
+        self.status_label.setStyleSheet(
+            f"color: {text_hint}; font-weight: bold; "
+            f"font-size: {self._get_font_size('size-lg', '13px')};")
         QTimer.singleShot(0, self.init_sftp)
 
     # ========== 快捷路径管理 ==========
@@ -5099,17 +5396,18 @@ class SFTPDialog(QDialog):
 
     def _style_shortcut_btn(self, btn):
         """为快捷路径按钮应用主题样式（深灰背景，紧凑尺寸）"""
+        compact_font = self._get_font_size('size-sm', '11px')
         if self._config_manager:
             btn_css = self._config_manager.get_button_css('button-secondary')
             if btn_css:
                 # 在主题CSS基础上叠加紧凑尺寸（覆盖 padding/min-height）
-                btn_css += """
-                    QPushButton {
+                btn_css += f"""
+                    QPushButton {{
                         padding: 0px 6px;
-                        font-size: 11px;
+                        font-size: {compact_font};
                         min-height: 20px;
                         max-height: 20px;
-                    }
+                    }}
                 """
                 btn.setStyleSheet(btn_css)
                 return
@@ -5120,41 +5418,44 @@ class SFTPDialog(QDialog):
         primary = self._get_style('primary', '#007acc')
         primary_hover = self._get_style('primary-hover', '#005a9e')
         primary_pressed = self._get_style('primary-pressed', '#004575')
+        on_primary = _get_on_primary_color(self._config_manager)
+        radius_sm = self._get_border_radius('sm', '4px')
         btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {bg};
                 color: {text};
                 border: 1px solid {border};
                 padding: 0px 6px;
-                font-size: 11px;
-                border-radius: 3px;
+                font-size: {compact_font};
+                border-radius: {radius_sm};
                 min-height: 20px;
                 max-height: 20px;
             }}
             QPushButton:hover {{
                 background-color: {primary};
-                color: #ffffff;
+                color: {on_primary};
                 border-color: {primary};
             }}
             QPushButton:pressed {{
                 background-color: {primary_pressed};
-                color: #ffffff;
+                color: {on_primary};
             }}
         """)
 
     def _style_operation_btn(self, btn):
         """为下方操作按钮（上传/下载/刷新/关闭）应用紧凑主题样式"""
+        compact_font = self._get_font_size('size-md', '12px')
         if self._config_manager:
             # 在主题 button 样式基础上叠加紧凑参数
             btn_css = self._config_manager.get_button_css('button')
             if btn_css:
-                btn_css += """
-                    QPushButton {
+                btn_css += f"""
+                    QPushButton {{
                         padding: 2px 14px;
-                        font-size: 12px;
+                        font-size: {compact_font};
                         min-height: 20px;
                         max-height: 24px;
-                    }
+                    }}
                 """
                 btn.setStyleSheet(btn_css)
                 return
@@ -5162,20 +5463,45 @@ class SFTPDialog(QDialog):
         primary = self._get_style('primary', '#007acc')
         primary_hover = self._get_style('primary-hover', '#005a9e')
         primary_pressed = self._get_style('primary-pressed', '#004575')
+        on_primary = _get_on_primary_color(self._config_manager)
+        radius_sm = self._get_border_radius('sm', '4px')
         btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {primary};
-                color: #ffffff;
+                color: {on_primary};
                 border: none;
                 padding: 2px 14px;
-                font-size: 12px;
+                font-size: {compact_font};
                 font-weight: bold;
-                border-radius: 4px;
+                border-radius: {radius_sm};
                 min-height: 20px;
                 max-height: 24px;
             }}
             QPushButton:hover {{ background-color: {primary_hover}; }}
             QPushButton:pressed {{ background-color: {primary_pressed}; }}
+        """)
+
+    def _style_secondary_btn(self, btn):
+        """为次要操作按钮（浏览/关闭）应用深色底 + 细边框样式"""
+        bg_input = self._get_style('bg-input', '#3c3c3c')
+        bg_hover = self._get_style('bg-input-focus', '#4c4c4c')
+        text_primary = self._get_style('text', '#ffffff')
+        border_light = self._get_style('border-light', '#5a5a5d')
+        compact_font = self._get_font_size('size-md', '12px')
+        radius_sm = self._get_border_radius('sm', '4px')
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border_light};
+                padding: 2px 14px;
+                font-size: {compact_font};
+                font-weight: normal;
+                border-radius: {radius_sm};
+                min-height: 20px;
+                max-height: 24px;
+            }}
+            QPushButton:hover {{ background-color: {bg_hover}; }}
         """)
 
     def _jump_to_shortcut(self, path):
@@ -5295,6 +5621,18 @@ class SFTPDialog(QDialog):
             return self._color_scheme.get(old_key_map[key], default)
         return default
 
+    def _get_font_size(self, key, default='12px'):
+        """获取字体大小（优先主题配置，回退默认值）"""
+        if self._config_manager:
+            return self._config_manager.get_font_size(key, default)
+        return default
+
+    def _get_border_radius(self, key, default='4px'):
+        """获取边框圆角（优先主题配置，回退默认值）"""
+        if self._config_manager:
+            return self._config_manager.get_border_radius(key, default)
+        return default
+
     def init_ui(self):
         self.setWindowTitle("SFTP 文件传输")
         self.setMinimumSize(430, 520)
@@ -5319,6 +5657,11 @@ class SFTPDialog(QDialog):
         primary = self._get_style('primary', '#007acc')
         primary_hover = self._get_style('primary-hover', '#005a9e')
         primary_pressed = self._get_style('primary-pressed', '#004575')
+        on_primary = _get_on_primary_color(self._config_manager)
+        font_size_md = self._get_font_size('size-md', '12px')
+        font_size_lg = self._get_font_size('size-lg', '13px')
+        font_size_sm = self._get_font_size('size-sm', '11px')
+        radius_sm = self._get_border_radius('sm', '4px')
 
         self.setStyleSheet(f"""
             QDialog {{
@@ -5327,15 +5670,15 @@ class SFTPDialog(QDialog):
             }}
             QLabel {{
                 color: {text_primary};
-                font-size: 13px;
+                font-size: {font_size_lg};
             }}
             QLineEdit {{
                 background-color: {bg_input};
                 color: {text_primary};
                 border: 1px solid {border_light};
                 padding: 5px 10px;
-                border-radius: 4px;
-                font-size: 13px;
+                border-radius: {radius_sm};
+                font-size: {font_size_lg};
             }}
             QLineEdit:focus {{
                 border-color: {border_focus};
@@ -5345,8 +5688,8 @@ class SFTPDialog(QDialog):
                 background-color: {bg_main};
                 color: {text_primary};
                 border: 1px solid {border};
-                border-radius: 4px;
-                font-size: 11px;
+                border-radius: {radius_sm};
+                font-size: {font_size_sm};
                 padding: 2px;
             }}
             QListWidget::item {{
@@ -5361,12 +5704,12 @@ class SFTPDialog(QDialog):
             }}
             QPushButton {{
                 background-color: {primary};
-                color: #ffffff;
+                color: {on_primary};
                 border: none;
                 padding: 2px 16px;
-                font-size: 12px;
+                font-size: {font_size_md};
                 font-weight: bold;
-                border-radius: 4px;
+                border-radius: {radius_sm};
                 min-height: 20px;
             }}
             QPushButton:hover {{
@@ -5384,16 +5727,14 @@ class SFTPDialog(QDialog):
         # 连接状态（创建后暂不添加到布局，最终移至最下方）
         text_danger = self._get_style('text-danger', '#ff6b6b')
         self.status_label = QLabel("SFTP状态: 未连接")
-        self.status_label.setStyleSheet(f"color: {text_danger}; font-weight: bold; font-size: 12px;")
+        self.status_label.setStyleSheet(
+            f"color: {text_danger}; font-weight: bold; font-size: {font_size_md};")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # 远程路径
         remote_layout = QHBoxLayout()
         remote_layout.setSpacing(6)  # 紧凑间距
-        remote_label = QLabel("远程路径:")
-        remote_label.setStyleSheet(f"color: {text_primary}; font-weight: 500;")
-        remote_label.setFixedWidth(72)  # 略微收窄标签
-        remote_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        remote_label = _make_form_label("远程路径:", f"color: {text_primary}; font-weight: 500;")
         remote_layout.addWidget(remote_label)
         self.remote_path = QLineEdit()
         self.remote_path.setText(self.current_remote_dir)
@@ -5404,10 +5745,7 @@ class SFTPDialog(QDialog):
         # 本地路径（显示上传/下载时使用的本地目录）
         local_layout = QHBoxLayout()
         local_layout.setSpacing(6)
-        local_label = QLabel("本地路径:")
-        local_label.setStyleSheet(f"color: {text_primary}; font-weight: 500;")
-        local_label.setFixedWidth(72)
-        local_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        local_label = _make_form_label("本地路径:", f"color: {text_primary}; font-weight: 500;")
         local_layout.addWidget(local_label)
         self.local_path = QLineEdit()
         self.local_path.setText(SFTPDialog._last_upload_dir)
@@ -5416,7 +5754,7 @@ class SFTPDialog(QDialog):
         # 浏览按钮：选择本地目录
         self.local_browse_btn = QPushButton("浏览")
         self.local_browse_btn.setFixedHeight(24)
-        self._style_operation_btn(self.local_browse_btn)
+        self._style_secondary_btn(self.local_browse_btn)
         self.local_browse_btn.clicked.connect(self._browse_local_dir)
         local_layout.addWidget(self.local_browse_btn)
         layout.addLayout(local_layout)
@@ -5448,7 +5786,7 @@ class SFTPDialog(QDialog):
         self._style_operation_btn(self.upload_btn)
         self._style_operation_btn(self.download_btn)
         self._style_operation_btn(self.refresh_btn)
-        self._style_operation_btn(close_btn)
+        self._style_secondary_btn(close_btn)
         btn_layout.addStretch(1)
         btn_layout.addWidget(self.upload_btn)
         btn_layout.addStretch(1)
@@ -5498,7 +5836,9 @@ class SFTPDialog(QDialog):
     def _set_status(self, text, color):
         """统一设置状态栏文本和颜色"""
         self.status_label.setText(text)
-        self.status_label.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 13px;")
+        self.status_label.setStyleSheet(
+            f"color: {color}; font-weight: bold; "
+            f"font-size: {self._get_font_size('size-lg', '13px')};")
 
     def set_buttons_enabled(self, enabled):
         """设置按钮状态"""
@@ -5578,16 +5918,18 @@ class SFTPDialog(QDialog):
                 self.current_remote_dir = parent
                 self.remote_path.setText(self.current_remote_dir)
                 self.refresh()
-            except:
-                pass
+            except Exception as exc:
+                Logger.get_instance().error(
+                    f"SFTP 返回上级目录失败: {exc}", exc_info=True)
         elif data['type'] == 'root':
             # 跳转根目录
             try:
                 self.current_remote_dir = "/"
                 self.remote_path.setText(self.current_remote_dir)
                 self.refresh()
-            except:
-                pass
+            except Exception as exc:
+                Logger.get_instance().error(
+                    f"SFTP 跳转根目录失败: {exc}", exc_info=True)
 
     def refresh(self):
         """刷新远程文件列表（根目录优先，上级目录次之，目录在前文件在后，按名称排序）"""
@@ -5638,14 +5980,6 @@ class SFTPDialog(QDialog):
                 return f"{size:.1f} {unit}"
             size /= 1024
         return f"{size:.1f} TB"
-
-    def _get_remote_file_size(self, remote_path):
-        """获取远程文件大小"""
-        try:
-            file_stat = self.sftp.stat(remote_path)
-            return file_stat.st_size
-        except:
-            return 0
 
     def upload(self):
         """上传文件到远程"""
@@ -5732,8 +6066,8 @@ class SFTPDialog(QDialog):
             try:
                 file_stat = self.sftp.stat(data['path'])
                 file_size = file_stat.st_size
-            except:
-                pass
+            except Exception as exc:
+                Logger.get_instance().debug(f"读取远程文件大小失败: {exc}")
 
         # 创建进度对话框
         progress = QProgressDialog(f"正在下载 {filename}...", None, 0, 100, self)
@@ -5772,8 +6106,8 @@ class SFTPDialog(QDialog):
         if self.sftp:
             try:
                 self.sftp.close()
-            except:
-                pass
+            except Exception as exc:
+                Logger.get_instance().debug(f"关闭 SFTP 连接失败: {exc}")
         # 保存快捷路径（即使弹窗未通过+按钮新增也可能有改动）
         self._save_shortcuts()
         event.accept()
@@ -5842,7 +6176,7 @@ class _ShortcutEditDialog(QDialog):
                 padding: 4px 8px;
                 font-size: {font_size_normal};
             }}
-            QLineEdit:focus {{ border: 2px solid {border_focus}; }}
+            QLineEdit:focus {{ border: 1px solid {border_focus}; }}
             QComboBox {{
                 background-color: {bg_input};
                 color: {text_primary};
@@ -5851,6 +6185,7 @@ class _ShortcutEditDialog(QDialog):
                 padding: 4px 8px;
                 font-size: {font_size_normal};
             }}
+            QComboBox:focus {{ border: 1px solid {border_focus}; }}
             QComboBox::drop-down {{ border: none; width: 20px; }}
             QComboBox::down-arrow {{ image: url({_ShortcutEditDialog._DOWN_ARROW_IMG}); }}
             QPushButton {{
@@ -5860,6 +6195,18 @@ class _ShortcutEditDialog(QDialog):
                 border-radius: {border_radius};
             }}
             {unified_btn_css}
+            QPushButton#secondary_btn {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border};
+                padding: 4px 16px;
+                font-size: {font_size_normal};
+                font-weight: normal;
+                border-radius: {border_radius};
+            }}
+            QPushButton#secondary_btn:hover {{
+                background-color: {border};
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -5871,10 +6218,7 @@ class _ShortcutEditDialog(QDialog):
         # 类型行：服务器路径 / 本地路径
         type_row = QHBoxLayout()
         type_row.setSpacing(6)
-        type_label = QLabel("类型:")
-        type_label.setStyleSheet(label_style)
-        type_label.setFixedWidth(70)
-        type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        type_label = _make_form_label("类型:", label_style)
         type_row.addWidget(type_label)
         self.type_combo = QComboBox()
         self.type_combo.addItem("服务器路径", 'remote')
@@ -5889,10 +6233,7 @@ class _ShortcutEditDialog(QDialog):
         # 名称行
         name_row = QHBoxLayout()
         name_row.setSpacing(6)
-        name_label = QLabel("名称:")
-        name_label.setStyleSheet(label_style)
-        name_label.setFixedWidth(70)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label = _make_form_label("名称:", label_style)
         name_row.addWidget(name_label)
         self.name_input = QLineEdit()
         self.name_input.setText(name)
@@ -5903,10 +6244,7 @@ class _ShortcutEditDialog(QDialog):
         # 路径行
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
-        path_label = QLabel("路径:")
-        path_label.setStyleSheet(label_style)
-        path_label.setFixedWidth(70)
-        path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        path_label = _make_form_label("路径:", label_style)
         path_row.addWidget(path_label)
         self.path_input = QLineEdit()
         self.path_input.setText(path)
@@ -5914,6 +6252,7 @@ class _ShortcutEditDialog(QDialog):
         path_row.addWidget(self.path_input)
         # 浏览按钮（仅本地路径类型时显示）
         self.browse_btn = QPushButton("浏览")
+        self.browse_btn.setObjectName("secondary_btn")
         self.browse_btn.clicked.connect(self._browse_path)
         path_row.addWidget(self.browse_btn)
         layout.addLayout(path_row)
@@ -5929,6 +6268,7 @@ class _ShortcutEditDialog(QDialog):
         btn_row.addStretch()
         ok_btn = QPushButton("确定")
         cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("secondary_btn")
         ok_btn.clicked.connect(self.accept)
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(ok_btn)
@@ -5974,7 +6314,6 @@ class ButtonEditDialog(QDialog):
         super().__init__(parent)
         self._button_data = button_data  # None = 新增
         self._config_manager = config_manager
-        self._script_preview = None  # 当前预览的脚本路径
         self.init_ui()
         if button_data:
             self._fill_form(button_data)
@@ -5989,6 +6328,11 @@ class ButtonEditDialog(QDialog):
             return self._config_manager.get_font_size(key, default)
         return default
 
+    def _get_radius(self, key, default='4px'):
+        if self._config_manager:
+            return self._config_manager.get_border_radius(key, default)
+        return default
+
     def init_ui(self):
         self.setWindowTitle("编辑按钮" if self._button_data else "新增按钮")
         self.setMinimumSize(480, 360)
@@ -6001,12 +6345,29 @@ class ButtonEditDialog(QDialog):
         border = self._get_style('border', '#3c3c3c')
         border_focus = self._get_style('border-focus', '#007acc')
         font_size_normal = self._get_font_size('size-md', '12px')
-        border_radius = self._get_style('border-radius-sm', '4px')
+        border_radius = self._get_radius('sm', '4px')
+        selection_text = self._get_style('selection-text', '#ffffff')
 
         # 使用统一菜单 CSS（用于 QComboBox 下拉列表）
         menu_css = self._config_manager.get_menu_css() if self._config_manager else ""
-        # 统一按钮 CSS（供确定/浏览等按钮复用）
+        # 统一按钮 CSS（供确定等主操作按钮复用）
         self._unified_btn_css = self._config_manager.get_button_css('button') if self._config_manager else ""
+        # 次要按钮 CSS（取消/浏览）：深色底 + 细边框，与主色确定按钮形成层级
+        self._secondary_btn_css = f"""
+            QPushButton {{
+                background-color: {bg_input};
+                color: {text_primary};
+                border: 1px solid {border};
+                border-radius: {border_radius};
+                padding: 6px 16px;
+                font-size: {font_size_normal};
+                font-weight: normal;
+            }}
+            QPushButton:hover {{
+                background-color: {bg_tertiary};
+                border-color: {border_focus};
+            }}
+        """
 
         self.setStyleSheet(f"""
             QDialog {{ background-color: {bg_main}; }}
@@ -6020,7 +6381,7 @@ class ButtonEditDialog(QDialog):
                 font-size: {font_size_normal};
             }}
             QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {{
-                border: 2px solid {border_focus};
+                border: 1px solid {border_focus};
             }}
             QComboBox::drop-down {{
                 border: none;
@@ -6034,7 +6395,7 @@ class ButtonEditDialog(QDialog):
                 color: {text_primary};
                 border: 1px solid {border};
                 selection-background-color: {self._get_style('primary', '#3a8fd4')};
-                selection-color: #ffffff;
+                selection-color: {selection_text};
                 outline: none;
             }}
             {menu_css}
@@ -6046,9 +6407,7 @@ class ButtonEditDialog(QDialog):
 
         # 名称行
         name_row = QHBoxLayout()
-        name_label = QLabel("名称:")
-        name_label.setFixedWidth(76)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label = _make_form_label("名称:")
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("按钮显示名称")
         name_row.addWidget(name_label)
@@ -6057,9 +6416,7 @@ class ButtonEditDialog(QDialog):
 
         # 类型行
         type_row = QHBoxLayout()
-        type_label = QLabel("类型:")
-        type_label.setFixedWidth(76)
-        type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        type_label = _make_form_label("类型:")
         self.type_combo = QComboBox()
         self.type_combo.addItem("命令", "command")
         self.type_combo.addItem("脚本", "script")
@@ -6085,18 +6442,7 @@ class ButtonEditDialog(QDialog):
         ok_btn.clicked.connect(self._on_accept)
         ok_btn.setStyleSheet(self._unified_btn_css)
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {bg_input};
-                color: {text_primary};
-                border: 1px solid {border};
-                border-radius: {border_radius};
-                padding: 6px 16px;
-                font-size: {font_size_normal};
-                font-weight: bold;
-            }}
-            QPushButton:hover {{ background-color: {bg_tertiary}; }}
-        """)
+        cancel_btn.setStyleSheet(self._secondary_btn_css)
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(ok_btn)
         btn_row.addWidget(cancel_btn)
@@ -6139,9 +6485,7 @@ class ButtonEditDialog(QDialog):
 
             # 超时
             timeout_row = QHBoxLayout()
-            timeout_label = QLabel("超时(秒):")
-            timeout_label.setFixedWidth(76)
-            timeout_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            timeout_label = _make_form_label("超时(秒):")
             self.timeout_input = QSpinBox()
             self.timeout_input.setRange(1, 60)
             self.timeout_input.setValue(5)
@@ -6160,7 +6504,7 @@ class ButtonEditDialog(QDialog):
             self.script_path_input.setPlaceholderText("选择 .py 脚本文件")
             browse_btn = QPushButton("浏览...")
             browse_btn.setFixedWidth(80)
-            browse_btn.setStyleSheet(self._unified_btn_css)
+            browse_btn.setStyleSheet(self._secondary_btn_css)
             browse_btn.clicked.connect(self._browse_script)
             path_row.addWidget(self.script_path_input)
             path_row.addWidget(browse_btn)
@@ -6168,9 +6512,7 @@ class ButtonEditDialog(QDialog):
 
             # 脚本下拉快速选择
             combo_row = QHBoxLayout()
-            combo_label = QLabel("快速选择:")
-            combo_label.setFixedWidth(76)
-            combo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            combo_label = _make_form_label("快速选择:")
             self.script_combo = QComboBox()
             self._populate_script_combo()
             self.script_combo.currentIndexChanged.connect(self._on_script_selected)
@@ -6223,7 +6565,6 @@ class ButtonEditDialog(QDialog):
             with open(path, 'r', encoding='utf-8') as f:
                 lines = [f.readline() for _ in range(20)]
             self.script_preview.setPlainText(''.join(lines))
-            self._script_preview = path
         except Exception as e:
             self.script_preview.setPlainText(f"无法读取: {e}")
 

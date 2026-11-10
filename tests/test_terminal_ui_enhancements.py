@@ -54,8 +54,13 @@ print('\n========== 2. Tabby 风格标签样式 ==========')
 check('2.1 _tab_bar_qss 方法存在（统一样式源）',
       hasattr(tw.TerminalWidget, '_tab_bar_qss'))
 qss_src = inspect.getsource(tw.TerminalWidget._tab_bar_qss)
-check('2.2 全圆角标签片（border-radius: 6px）',
-      "border-radius: 6px" in qss_src)
+# 2.2 检查实际生成的 QSS（与 5.3 同口径）：源码已改为走主题圆角取值，
+# 不再从源码字面量断言，但仍要求生成结果中圆角为 6px。
+_qss_probe = tw.TerminalWidget.__new__(tw.TerminalWidget)
+_qss_probe._config_manager = None
+qss_generated = _qss_probe._tab_bar_qss()
+check('2.2 全圆角标签片（生成 QSS 含 border-radius: 6px）',
+      "border-radius: 6px" in qss_generated)
 check('2.3 无生硬边框（border: none）',
       'border: none' in qss_src)
 check('2.4 标签栏透明浮起（QTabBar background: transparent）',
