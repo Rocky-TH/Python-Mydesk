@@ -1,0 +1,67 @@
+{
+ "app": "vim",
+ "rows": 24,
+ "cols": 80,
+ "steps": [
+  {
+   "label": "启动",
+   "data": "\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001h\u001b[?1049h\u001b[22;0;0t\u001b[?1h\u001b=\u001b[?2004h\u001b[?1004h\u001b[1;24r\u001b[?12h\u001b[?12l\u001b[22;2t\u001b[22;1t\u001b[27m\u001b[23m\u001b[29m\u001b[m\u001b[H\u001b[2J\u001b[?25l\u001b[24;1H\"~/demo.txt\" [unix] 4L, 62B\u001b[2;1H▽\u001b[6n\u001b[2;1H  \u001b[3;1H\u001bPzz\u001b\\\u001b[0m\u001b[6n\u001b[3;1H           \u001b[1;1H\u001b[6n"
+  },
+  {
+   "label": "i 进入插入并输入",
+   "data": "\u001b[>c\u001b[1;1Halpha line one\r\nbeta line two\u001b[2;14H\u001b[K\u001b[3;1Hgamma line three\u001b[3;17H\u001b[K\u001b[4;1Hdelta line four\r\n\u001b[94m~                                                                               \u001b[6;1H~                                                                               \u001b[7;1H~                                                                               \u001b[8;1H~                                                                               \u001b[9;1H~                                                                               \u001b[10;1H~                                                                               \u001b[11;1H~                                                                               \u001b[12;1H~                                                                               \u001b[13;1H~                                                                               \u001b[14;1H~                                                                               \u001b[15;1H~                                                                               \u001b[16;1H~                                                                               \u001b[17;1H~                                                                               \u001b[18;1H~                                                                               \u001b[19;1H~                                                                               \u001b[20;1H~                                                                               \u001b[21;1H~                                                                               \u001b[22;1H~                                                                               \u001b[23;1H~                                                                               \u001b[m\u001b[24;63H1,1\u001b[11CAll\u001b[1;1H\u001b[?25h\u0007\u001b[?25l\u001b[24;65H5\u001b[1;5H\u001b[?25h\u001b[?25l\u001b[24;65H6\u001b[1;6H\u001b[?25h\u001b[?25l\u001b[24;65H7\u001b[1;7H\u001b[?25h\u001b[?25l\u001b[24;1H\u001b[1m-- INSERT --\u001b[m\u001b[24;14H\u001b[K\u001b[24;63H2,1\u001b[11CTop\u001b[2;23r\u001b[2;1H\u001b[L\u001b[1;24r\u001b[24;63H\u001b[K\u001b[24;63H2,2\u001b[11CAll\u001b[2;2H\u001b[?4m\u001b[6n"
+  },
+  {
+   "label": "Esc 回到普通模式",
+   "data": "\u001b[?25h\u001b[24;1H\u001b[K\u001b[2;1H\u001b[?25l\u001b[24;53H^[\u001b[2;1H\u001b[?25h"
+  },
+  {
+   "label": ":w 保存",
+   "data": "\u001b[?25l\u001b[24;53H  \u001b[2;2H\u001b[24;63H2,1\u001b[11CAll\u001b[2;1H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:w\r\"demo.txt\" [unix] 5L, 64B written\u001b[29C2,1\u001b[11CAll\u001b[24;63H\u001b[K\u001b[24;63H2,1\u001b[11CAll\u001b[2;1H\u001b[?25h"
+  },
+  {
+   "label": "再次修改",
+   "data": "\u001b[?25l\u001b[24;1H\u001b[1m-- INSERT --\u001b[m\u001b[24;13H\u001b[K\u001b[24;63H2,2\u001b[11CAll\u001b[24;1H\u001b[K\u001b[2;6H\b\b\btail\u001b[24;1H\u001b[1m-- INSERT --\u001b[m\u001b[50C2,7\u001b[11CAll\u001b[2;7H\u001b[24;53H^[\u001b[2;6H\u001b[?25h"
+  },
+  {
+   "label": "/line 搜索回车",
+   "data": "\u001b[?25l\u001b[24;53H  \u001b[2;7H\u001b[24;1H\u001b[K\u001b[24;63H2,6\u001b[11CAll\u001b[2;6H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H/line\r\u001b[62C3,6\u001b[11CAll\u001b[3;6H\u001b[?25h"
+  },
+  {
+   "label": "n 下一个匹配",
+   "data": "\u001b[?25l\u001b[24;53Hn\u001b[3;6H\u001b[24;53H\u001b[K\u001b[24;1H\u001b[4;7H\u001b[24;63H4,7\u001b[11CAll\u001b[4;7H\u001b[?25h"
+  },
+  {
+   "label": "Esc 退出搜索",
+   "data": "\u001b[?25l\u001b[24;53H^[\u001b[4;7H\u001b[?25h"
+  },
+  {
+   "label": "gg 回到首行",
+   "data": "\u001b[?25l\u001b[24;53H  \u001b[4;7H\u0007\u001b[?25h\u001b[?25l\u001b[24;53Hgg\u001b[4;7H\u001b[24;53H  \u001b[1;1H\u001b[24;63H1,1\u001b[1;1H\u001b[?25h"
+  },
+  {
+   "label": "G 跳到末行",
+   "data": "\u001b[?25l\u001b[24;53HG\u001b[1;1H\u001b[24;53H \u001b[5;1H\u001b[24;63H5\u001b[5;1H\u001b[?25h"
+  },
+  {
+   "label": "dd 删除当前行",
+   "data": "\u001b[?25l\u001b[24;53Hdd\u001b[5;1H\u001b[24;53H  \u001b[4;1H\r\n\u001b[94m~                                                                               \u001b[m\u001b[24;63H4\u001b[4;1H\u001b[?25h"
+  },
+  {
+   "label": "o 插入新行",
+   "data": "\u001b[?25l\u001b[24;1H\u001b[1m-- INSERT --\u001b[m\u001b[24;63H\u001b[K\u001b[24;63H5,1\u001b[11CTop\u001b[24;1H\u001b[K\u001b[5;13H\rinserted by o\u001b[5;14H\u001b[K\u001b[24;1H\u001b[1m-- INSERT --\u001b[m\u001b[50C5,14\u001b[10CAll\u001b[5;14H\u001b[24;53H^[\u001b[5;13H\u001b[?25h"
+  },
+  {
+   "label": "多次进出命令行模式",
+   "data": "\u001b[?25l\u001b[24;53H  \u001b[5;14H\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:\u001b[?25h"
+  },
+  {
+   "label": ":q 未保存提示(E37)",
+   "data": "\u001b[?25l\u001b[24;1H\u001b[K\u001b[24;63H5,13\u001b[10CAll\u001b[5;13H\u001b[?25h\u001b[?25l\u001b[24;63H\u001b[K\u001b[24;1H:q\r\u001b[97m\u001b[41mE37: No write since last change (add ! to override)\u001b[m\u001b[11C5,13\u001b[10CAll\u001b[5;13H\u001b[?25h"
+  },
+  {
+   "label": ":wq 保存退出",
+   "data": "\u001b[?25l\u001b[24;1H\u001b[K\u001b[24;1H:wq\r\u001b[?2004l\"demo.txt\" [unix] 5L, 67B written\r\u001b[23;2t\u001b[23;1t\r\n\u001b[?1004l\u001b[?1004h\u001b[?2004l\u001b[?1l\u001b>\u001b[?1049l\u001b[23;0;0t\u001b[?25h"
+  }
+ ]
+}

@@ -1,0 +1,35 @@
+{
+ "app": "nano",
+ "rows": 24,
+ "cols": 80,
+ "steps": [
+  {
+   "label": "启动",
+   "data": "\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001h\u001b[?2004h\u001b[?1049h\u001b[22;0;0t\u001b[1;24r\u001b(B\u001b[m\u001b[4l\u001b[?7h\u001b[39;49m\u001b[?1h\u001b=\u001b[?1h\u001b=\u001b[?25l\u001b[39;49m\u001b(B\u001b[m\u001b[H\u001b[2J\u001b[22;34H\u001b(B\u001b[0;1m\u001b[37m\u001b[42m[ Reading... ]\u001b[39;49m\u001b(B\u001b[m\u001b[22;33H\u001b(B\u001b[0;1m\u001b[37m\u001b[42m[ Read 2 lines ]\u001b[39;49m\u001b(B\u001b[m\u001b[H\u001b(B\u001b[0;1m\u001b[37m\u001b[44m  C:\\Users\\hpuzh\\AppData\\Local\\Temp\\fullscreen_rec\\work\\nano_demo.txt\u001b[K\u001b[79G\u001b[39;49m\u001b(B\u001b[m\r\u001b[23d\u001b[36m^G\u001b[39m\u001b(B\u001b[m \u001b[32mHelp\u001b[14G\u001b[36m^O\u001b[39m\u001b(B\u001b[m \u001b[32mWrite Out\u001b[39m\u001b(B\u001b[m \u001b[36m^F\u001b[39m\u001b(B\u001b[m \u001b[32mWhere Is\u001b[39m\u001b(B\u001b[m  \u001b[36m^K\u001b[39m\u001b(B\u001b[m \u001b[32mCut\u001b[53G\u001b[36m^T\u001b[39m\u001b(B\u001b[m \u001b[32mExecute\u001b[39m\u001b(B\u001b[m   \u001b[36m^C\u001b[39m\u001b(B\u001b[m \u001b[32mLocation\r\u001b[24d\u001b[36m^X\u001b[39m\u001b(B\u001b[m \u001b[32mExit\u001b[14G\u001b[36m^R\u001b[39m\u001b(B\u001b[m \u001b[32mRead File\u001b[39m\u001b(B\u001b[m \u001b[36m^\\\u001b[39m\u001b(B\u001b[m \u001b[32mReplace\u001b[39m\u001b(B\u001b[m   \u001b[36m^U\u001b[39m\u001b(B\u001b[m \u001b[32mPaste\u001b[39m\u001b(B\u001b[m     \u001b[36m^J\u001b[39m\u001b(B\u001b[m \u001b[32mJustify\u001b[39m\u001b(B\u001b[m   \u001b[36m^/\u001b[39m\u001b(B\u001b[m \u001b[32mGo To Line\u001b[39m\u001b(B\u001b[m\r\u001b[2dnano first line\r\u001b[3dnano second line\r\u001b[A\u001b[?12l\u001b[?25h"
+  },
+  {
+   "label": "输入中文",
+   "data": "\u001b[?25l\u001b[1;71H\u001b(B\u001b[0;1m\u001b[37m\u001b[44mModified\u001b[39;49m\u001b(B\u001b[m\u001b[?12l\u001b[?25h\r\u001b[2d中文测试abcnano first line\u001b[2;12H"
+  },
+  {
+   "label": "^O 保存",
+   "data": "\u001b[?25l\u001b[23;14H   \u001b[36mM-D\u001b[39m\u001b(B\u001b[m \u001b[32mDOS Format\u001b[39m\u001b(B\u001b[m  \u001b[36mM-A\u001b[39m\u001b(B\u001b[m \u001b[32mAppend\u001b[39m\u001b(B\u001b[m      \u001b[36mM-B\u001b[39m\u001b(B\u001b[m \u001b[32mBackup File\u001b[39m\u001b(B\u001b[m \u001b[36m^T\u001b[39m\u001b(B\u001b[m \u001b[32mBrowse\u001b[39m\u001b(B\u001b[m\u001b[K\u001b[24;2H\u001b[36mC\u001b[39m\u001b(B\u001b[m \u001b[32mCancel\u001b[39m\u001b(B\u001b[m       \u001b[36mM-M\u001b[39m\u001b(B\u001b[m \u001b[32mMac Format\u001b[39m\u001b(B\u001b[m  \u001b[36mM-P\u001b[39m\u001b(B\u001b[m \u001b[32mPrepend\u001b[39m\u001b(B\u001b[m     \u001b[36m^Q\u001b[39m\u001b(B\u001b[m \u001b[32mDiscard buffer\u001b[39m\u001b(B\u001b[m\u001b[K\u001b[23;74H\r\u001b[A\u001b[97m\u001b[100mWrite to File:<.txt\u001b[K\u001b[39;49m\u001b(B\u001b[m\u001b[?12l\u001b[?25h"
+  },
+  {
+   "label": "确认文件名回车",
+   "data": "\u001b[?25l\u001b[22;33H\u001b[1K \u001b(B\u001b[0;1m\u001b[37m\u001b[42m[ Writing... ]\u001b[39;49m\u001b(B\u001b[m\u001b[K\u001b[1;71H\u001b(B\u001b[0;1m\u001b[37m\u001b[44m\u001b[K\u001b[79G\u001b[39;49m\u001b(B\u001b[m\u001b[22;32H\u001b(B\u001b[0;1m\u001b[37m\u001b[42m[ Wrote 2 lines ]\u001b[39;49m\u001b(B\u001b[m\u001b[23;14H\u001b[36m^O\u001b[39m\u001b(B\u001b[m \u001b[32mWrite Out\u001b[39m\u001b(B\u001b[m \u001b[36m^F\u001b[39m\u001b(B\u001b[m \u001b[32mWhere Is\u001b[39m\u001b(B\u001b[m  \u001b[36m^K\u001b[39m\u001b(B\u001b[m \u001b[32mCut\u001b[39m\u001b(B\u001b[m       \u001b[36m^T\u001b[39m\u001b(B\u001b[m \u001b[32mExecute\u001b[39m\u001b(B\u001b[m   \u001b[36m^C\u001b[39m\u001b(B\u001b[m \u001b[32mLocation\u001b[24;2H\u001b[36mX\u001b[39m\u001b(B\u001b[m \u001b[32mExit\u001b[39m\u001b(B\u001b[m      \u001b[36m^R\u001b[39m\u001b(B\u001b[m \u001b[32mRead File\u001b[39m\u001b(B\u001b[m \u001b[36m^\\\u001b[39m\u001b(B\u001b[m \u001b[32mReplace\u001b[39m\u001b(B\u001b[m   \u001b[36m^U\u001b[39m\u001b(B\u001b[m \u001b[32mPaste\u001b[39m\u001b(B\u001b[m     \u001b[36m^J\u001b[39m\u001b(B\u001b[m \u001b[32mJustify\u001b[39m\u001b(B\u001b[m   \u001b[36m^/\u001b[39m\u001b(B\u001b[m \u001b[32mGo To Line\u001b[39m\u001b(B\u001b[m\u001b[?12l\u001b[?25h\u001b[2;12H"
+  },
+  {
+   "label": "再输入字母",
+   "data": "\u001b[?25l\u001b[1;71H\u001b(B\u001b[0;1m\u001b[37m\u001b[44mModified\u001b[39;49m\u001b(B\u001b[m\u001b[?12l\u001b[?25h\u001b[2;12Hxyznano first line\u001b[2;15H"
+  },
+  {
+   "label": "^X 退出(有修改提示)",
+   "data": "\u001b[?25l\r\u001b[22d\u001b[97m\u001b[100mSave modified buffer?\u001b[K\r\u001b[23d\u001b[39;49m\u001b[36m Y\u001b[39m\u001b(B\u001b[m \u001b[32mYes\u001b[39m\u001b(B\u001b[m\u001b[K\r\u001b[24d\u001b[36m N\u001b[39m\u001b(B\u001b[m \u001b[32mNo\u001b[39m\u001b(B\u001b[m  \u001b[14G   \u001b[36m^C\u001b[39m\u001b(B\u001b[m \u001b[32mCancel\u001b[39m\u001b(B\u001b[m\u001b[K\u001b[22;23H\u001b[?12l\u001b[?25h"
+  },
+  {
+   "label": "不保存 N",
+   "data": "\u001b[?25l\r\u001b[J\u001b[24d\u001b[?12l\u001b[?25h\u001b[24;1H\u001b[?1049l\u001b[23;0;0t\r\u001b[?1l\u001b>\u001b[?2004l"
+  }
+ ]
+}

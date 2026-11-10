@@ -1,21 +1,16 @@
-import os
 import json
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QStackedWidget,
-    QMenuBar, QMenu, QStatusBar, QLabel,
-    QToolBar, QTabWidget, QMessageBox,
+    QMenuBar, QStatusBar, QLabel,
+    QToolBar, QTabWidget,
     QDialog, QTextEdit, QPushButton
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction, QActionGroup
+from utils import dialog_helper
 from utils.config_manager import ConfigManager
+from utils.logger import Logger
 from utils.icon_generator import load_app_icon
-
-# 下拉框三角形箭头图片路径
-_DOWN_ARROW_IMG = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    'assets', 'down_arrow.png'
-).replace('\\', '/')
 
 
 class ThemeSwitchWorker(QThread):
@@ -56,6 +51,16 @@ class MainWindow(QMainWindow):
         if self.config_manager:
             return self.config_manager.get_color(key, default)
         return default
+
+    def _status_bar_colors(self):
+        """状态栏配色（深色主色底白字，浅色浅底深字），来自主题组件 status-bar"""
+        if self.config_manager:
+            bg = self.config_manager.get_component_style_value(
+                'status-bar', 'bg', self._get_style('primary', '#007acc'))
+            fg = self.config_manager.get_component_style_value(
+                'status-bar', 'color', '#ffffff')
+            return bg, fg
+        return '#007acc', '#ffffff'
     
     def _get_font_size(self, key, default='12px'):
         """获取字体大小"""
@@ -107,9 +112,7 @@ class MainWindow(QMainWindow):
             QWidget {{
                 background-color: {bg_main};
             }}
-            QComboBox::down-arrow {{
-                image: url({_DOWN_ARROW_IMG});
-            }}
+            {self.config_manager.get_combo_arrow_css()}
         """)
         self.setCentralWidget(self.central_widget)
 
@@ -199,13 +202,11 @@ class MainWindow(QMainWindow):
 
         self.file_menu.addSeparator()
 
-        # 设置菜单
-        settings_menu = QMenu("设置", self)
-        self.file_menu.addMenu(settings_menu)
+        # 设置菜单（通过父菜单创建，使其继承菜单栏上的 QMenu 样式）
+        settings_menu = self.file_menu.addMenu("设置")
 
         # 主题设置子菜单
-        self.theme_menu = QMenu("主题", self)
-        settings_menu.addMenu(self.theme_menu)
+        self.theme_menu = settings_menu.addMenu("主题")
         self._theme_actions = {}
         
         # 使用 QActionGroup 确保主题选项互斥（只能选一个）
@@ -414,12 +415,6 @@ class MainWindow(QMainWindow):
                 params = item.get("params", "")
 
                 action = QAction(label, self)
-                text_secondary = self._get_style('text-secondary', '#cccccc')
-                action.setStyleSheet(f"""
-                    QAction {{
-                        color: {text_secondary};
-                    }}
-                """)
                 if action_type == "quick_connect":
                     action.triggered.connect(
                         lambda checked, p=params, pn=plugin_name: self.quick_connect(p, pn)
@@ -442,11 +437,11 @@ class MainWindow(QMainWindow):
             return  # 状态栏只创建一次
         
         self.status_bar = QStatusBar()
-        primary = self._get_style('primary', '#007acc')
+        status_bg, status_fg = self._status_bar_colors()
         self.status_bar.setStyleSheet(f"""
             QStatusBar {{
-                background-color: {primary};
-                color: #ffffff;
+                background-color: {status_bg};
+                color: {status_fg};
             }}
             QStatusBar::item {{ border: none; }}
         """)
@@ -455,13 +450,13 @@ class MainWindow(QMainWindow):
 
         # 框架状态（左侧）：显示当前插件名 + 框架就绪状态
         self.status_label = QLabel("就绪")
-        self.status_label.setStyleSheet("color: #ffffff;")
+        self.status_label.setStyleSheet(f"color: {status_fg};")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_bar.addWidget(self.status_label)
 
         # 工具状态（左侧）：显示当前工具上报的状态，紧跟框架状态之后
         self.tool_status_label = QLabel("")
-        self.tool_status_label.setStyleSheet("color: #ffffff; margin-left: 6px;")
+        self.tool_status_label.setStyleSheet(f"color: {status_fg}; margin-left: 6px;")
         self.tool_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_bar.addWidget(self.tool_status_label)
 
@@ -480,19 +475,8 @@ class MainWindow(QMainWindow):
         self.plugin_tabs.clear()
         self.plugin_widgets.clear()
 
-        # 定义插件标签页的颜色方案
-        plugin_tab_colors = [
-            {"bg": "#2a5d7e", "border": "#3a8fd4"},  # 终端 - 柔和深蓝
-            {"bg": "#1a5d3e", "border": "#28a745"},  # 编译工具 - 深绿
-            {"bg": "#3d2b1f", "border": "#d97706"},  # 脚本管理 - 橙色
-            {"bg": "#2d3a4a", "border": "#569cd6"},  # 计算工具 - 浅蓝
-            {"bg": "#3d1f2b", "border": "#f44747"},  # 远程命令 - 红色
-            {"bg": "#1a3d2e", "border": "#4ec9b0"},  # 协议测试 - 青绿
-            {"bg": "#3d2b4a", "border": "#a06bff"},  # 调测工具 - 紫色
-        ]
-
         # 为每个插件创建标签页
-        for index, plugin_info in enumerate(plugin_configs):
+        for plugin_info in plugin_configs:
             plugin_name = plugin_info.get("name", "")
             
             # 从插件单独配置文件获取 display_name
@@ -514,19 +498,7 @@ class MainWindow(QMainWindow):
                 self.plugin_widgets[plugin_name] = widget
                 
                 # 添加到标签页
-                tab_index = self.plugin_tabs.addTab(widget, display_name)
-                
-                # 为标签页设置不同的颜色
-                if index < len(plugin_tab_colors):
-                    color_info = plugin_tab_colors[index]
-                    bg_color = color_info["bg"]
-                    border_color = color_info["border"]
-                    
-                    # 设置标签样式
-                    self.plugin_tabs.tabBar().setTabData(tab_index, {
-                        "bg": bg_color,
-                        "border": border_color
-                    })
+                self.plugin_tabs.addTab(widget, display_name)
 
         # 根据插件配置动态构建菜单和工具栏
         self.build_plugin_actions()
@@ -659,6 +631,7 @@ class MainWindow(QMainWindow):
                 QWidget {{
                     background-color: {bg_main};
                 }}
+                {self.config_manager.get_combo_arrow_css()}
             """)
         
         # 刷新插件标签页样式（统一使用主题配色，不区分标签页）
@@ -703,35 +676,49 @@ class MainWindow(QMainWindow):
         
         # 刷新状态栏样式
         if self._status_bar_created:
-            primary = self._get_style('primary', '#007acc')
+            status_bg, status_fg = self._status_bar_colors()
             self.status_bar.setStyleSheet(f"""
                 QStatusBar {{
-                    background-color: {primary};
-                    color: #ffffff;
+                    background-color: {status_bg};
+                    color: {status_fg};
                 }}
                 QStatusBar::item {{ border: none; }}
             """)
-            self.status_label.setStyleSheet("color: #ffffff;")
-            self.tool_status_label.setStyleSheet("color: #ffffff; margin-left: 6px;")
+            self.status_label.setStyleSheet(f"color: {status_fg};")
+            self.tool_status_label.setStyleSheet(f"color: {status_fg}; margin-left: 6px;")
     
     def _refresh_plugin_styles(self):
-        """通知所有插件控件刷新样式"""
+        """通知所有插件控件刷新样式。
+
+        单个插件刷新失败只记录日志并在状态栏提示，不中断其它插件的刷新。
+        """
+        logger = Logger.get_instance()
+        failed_plugins = []
         for plugin_name, widget in self.plugin_widgets.items():
             if hasattr(widget, 'refresh_theme_styles'):
                 try:
                     widget.refresh_theme_styles()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    failed_plugins.append(plugin_name)
+                    logger.error(
+                        f"插件 {plugin_name} 主题刷新失败: {exc}", exc_info=True
+                    )
+        if failed_plugins:
+            message = "主题刷新失败：" + "、".join(failed_plugins)
+            logger.warning(message)
+            if self._status_bar_created:
+                self.status_bar.showMessage(message, 8000)
     
     def show_about(self):
         """显示关于对话框：仅包含版本号与主要使用场景。"""
-        QMessageBox.about(
+        text_hint = self.config_manager.get_color('text-hint', '#858585')
+        dialog_helper.show_info(
             self,
             "关于 MyDesk",
             f"""
             <div style='text-align:center;'>
                 <h2 style='margin-bottom:0;'>MyDesk</h2>
-                <p style='margin-top:2px;color:#666;'>版本 {self._app_version}</p>
+                <p style='margin-top:2px;color:{text_hint};'>版本 {self._app_version}</p>
             </div>
             <hr>
             <p><b>主要使用场景</b></p>
@@ -742,7 +729,9 @@ class MainWindow(QMainWindow):
                 <li>远程编译与构建</li>
                 <li>计算器与数制 / 字符串转换</li>
             </ul>
-            """
+            """,
+            self.config_manager,
+            rich_text=True
         )
 
     def show_license_info(self):
@@ -761,24 +750,32 @@ class MainWindow(QMainWindow):
              "https://github.com/pyserial/pyserial"),
         ]
 
+        text_hint = self.config_manager.get_color('text-hint', '#858585')
+        bg_input = self.config_manager.get_color('bg-input', '#454545')
+        text_primary = self.config_manager.get_color('text', '#e0e0e0')
+        border = self.config_manager.get_color('border', '#3c3c3c')
+
         lines = []
         lines.append("<div style='text-align:center;'>")
         lines.append("<h2 style='margin-bottom:2px;'>开源许可</h2>")
-        lines.append("<p style='margin-top:0;color:#666;'>MyDesk 使用的第三方开源组件</p>")
+        lines.append(
+            f"<p style='margin-top:0;color:{text_hint};'>"
+            "MyDesk 使用的第三方开源组件</p>"
+        )
         lines.append("</div><hr>")
 
         for name, lic, url in licenses:
             lines.append(
                 f"<p style='margin:8px 0;'>"
                 f"<b>{name}</b> — {lic}<br>"
-                f"<span style='color:#666;'>主页：</span>"
+                f"<span style='color:{text_hint};'>主页：</span>"
                 f"<a href='{url}'>{url}</a>"
                 f"</p>"
             )
 
         lines.append("<hr>")
         lines.append(
-            "<p style='color:#666;font-size:11px;'>"
+            f"<p style='color:{text_hint};font-size:11px;'>"
             "以上许可信息均来自各项目的官方元数据。各组件的完整许可文本"
             "请以对应项目源代码中的 LICENSE 文件为准。"
             "</p>"
@@ -788,15 +785,21 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("开源许可")
         dialog.setMinimumWidth(460)
+        dialog_helper.apply_dialog_theme(dialog, self.config_manager)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
 
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
+        text_edit.setStyleSheet(
+            f"QTextEdit {{ background-color: {bg_input}; color: {text_primary}; "
+            f"border: 1px solid {border}; }}"
+        )
         text_edit.setHtml("".join(lines))
         layout.addWidget(text_edit)
 
         close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet(self.config_manager.get_button_css('button-secondary'))
         close_btn.clicked.connect(dialog.accept)
         layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
 

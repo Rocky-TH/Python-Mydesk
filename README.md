@@ -111,11 +111,12 @@ MyDesk/
 │   ├── script_manager/      # 脚本管理与执行
 │   ├── calc_tool/           # 标准/程序员计算器
 │   ├── remote_cmd/          # 远程命令执行（基础服务）
-│   ├── debug_tool/          # 日志调测查看器
-│   └── quickly_cmd/         # 快捷面板（内嵌编译/计算入口）
+│   └── debug_tool/          # 日志调测查看器
 ├── utils/
 │   ├── config_manager.py    # 配置与插件数据持久化
 │   ├── logger.py            # 全局日志单例
+│   ├── ansi_parser.py       # 终端 ANSI 转义序列解析
+│   ├── dialog_helper.py     # 主题化弹窗、确认框与文件选择
 │   └── icon_generator.py    # 图标生成工具
 ├── config/                  # 运行时配置（自动生成，可随需修改）
 │   ├── plugin.json          # 插件注册清单与应用信息
@@ -123,7 +124,7 @@ MyDesk/
 │   ├── theme/light.json     # 浅色主题配色
 │   └── *.json / *.xml       # 各插件的配置与数据
 ├── scripts/                 # 远程执行示例脚本（自动化测试/状态检查/部署）
-├── tests/                   # 终端 ANSI、选区、拖拽等测试与可视化预览脚本
+├── tests/                   # 终端 ANSI / 按键 / 选区 / 标签拖拽、计算器模式测试与可视化预览
 └── assets/                  # 图标等静态资源
 ```
 
@@ -156,7 +157,7 @@ pyserial>=3.5     # 串口通信
 python main.py
 ```
 
-启动后在左侧 / 顶部切换「终端、协议测试、编译工具、脚本管理、计算工具、调测工具」等页签即可使用。
+启动后在顶部切换「终端、编译工具、脚本管理、计算工具、远程命令、协议测试」等页签即可使用；调测工具默认不占页签，可通过菜单「调测 → 显示调测工具」打开。
 
 ### 4. 添加连接
 
@@ -168,7 +169,7 @@ python main.py
 
 ## 主题与配置
 
-- **切换主题**：主菜单「设置 → 主题」选择深色 / 浅色，即时生效并持久化；
+- **切换主题**：主菜单「文件 → 设置 → 主题」选择深色 / 浅色，即时生效并持久化；
 - **主题配色**：编辑 `config/theme/dark.json`、`config/theme/light.json` 可自定义颜色；
 - **插件配置**：各工具配置独立保存在 `config/<plugin>_config.json`，连接数据在 `config/connections.json`；
 - **日志位置**：应用日志 `logs/mydesk_debug_YYYYMMDD.log`，终端会话日志 `logs/terminal/`。

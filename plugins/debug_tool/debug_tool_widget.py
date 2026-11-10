@@ -100,12 +100,7 @@ class DebugToolPlugin:
             if self.name not in main_window.plugin_widgets:
                 widget = self.get_widget()
                 main_window.plugin_widgets[self.name] = widget
-                # 查找颜色方案
-                tab_colors = [
-                    {"bg": "#3d2b4a", "border": "#a06bff"},  # 调测工具 - 紫色
-                ]
-                tab_index = main_window.plugin_tabs.addTab(widget, self.display_name)
-                main_window.plugin_tabs.tabBar().setTabData(tab_index, tab_colors[0])
+                main_window.plugin_tabs.addTab(widget, self.display_name)
         else:
             if self.name in main_window.plugin_widgets:
                 widget = main_window.plugin_widgets[self.name]

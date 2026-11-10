@@ -2,6 +2,7 @@ import os
 import posixpath
 import re
 import time
+import unicodedata
 import uuid
 from datetime import datetime
 from stat import S_ISDIR
@@ -1185,10 +1186,27 @@ class SessionTab(QWidget):
         block = cursor.block()
         block_end = block.position() + block.length() - 1  # 块内最后一个可见字符之后的位置
         if cursor.position() < block_end:
-            # 光标右侧还有字符：选中右侧一个字符并替换（终端覆盖语义）
-            cursor.movePosition(QTextCursor.MoveOperation.Right,
-                                QTextCursor.MoveMode.KeepAnchor, 1)
-            cursor.insertText(ch)
+            # 光标右侧还有字符：终端按单元格覆盖，需吞掉合计宽度不少于本字符
+            # 宽度的旧字符（中文占 2 格，只替换 1 个字符会留下半格错位）
+            width = self._char_width(ch)
+            consumed = 0
+            count = 0
+            base = block.position()
+            line_text = block.text()
+            while consumed < width:
+                idx = cursor.position() - base + count
+                if idx >= len(line_text):
+                    break
+                consumed += self._char_width(line_text[idx])
+                count += 1
+            if count:
+                cursor.movePosition(QTextCursor.MoveOperation.Right,
+                                    QTextCursor.MoveMode.KeepAnchor, count)
+            # 旧字符比新字符宽时补空格，保持该行后续内容的显示列不变
+            start = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+            cursor.insertText(ch + ' ' * max(0, consumed - width))
+            # 光标只前进本字符占用的单元格；补齐的空格留给后续字符覆盖
+            cursor.setPosition(start + 1)
         else:
             cursor.insertText(ch)
 
@@ -1198,6 +1216,46 @@ class SessionTab(QWidget):
         if prev and len(prev) == 2:
             return max(20, int(prev[0]))
         return 80
+
+    @staticmethod
+    def _char_width(ch):
+        """单个字符占用的终端单元格宽度
+
+        中文等东亚宽字符占 2 格，组合符/零宽字符占 0 格，其余占 1 格。
+        QTextDocument 的位置按字符计，终端 CUP/换行按单元格计，
+        两者在含中文时必须换算，否则光标会落到错误字符位置。
+        """
+        if unicodedata.combining(ch) or unicodedata.category(ch) in ('Mn', 'Me', 'Cf'):
+            return 0
+        return 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+
+    @classmethod
+    def _text_width(cls, text):
+        """一段文本占用的终端单元格数"""
+        return sum(cls._char_width(c) for c in text)
+
+    @classmethod
+    def _col_to_offset(cls, line, col):
+        """1 基显示列 → 行内字符下标（宽字符按 2 列计）"""
+        if col <= 1:
+            return 0
+        target = col - 1
+        width = 0
+        for i, ch in enumerate(line):
+            if width >= target:
+                return i
+            width += cls._char_width(ch)
+        return len(line)
+
+    @classmethod
+    def _offset_to_col(cls, line, offset):
+        """行内字符下标 → 1 基显示列"""
+        return cls._text_width(line[:max(0, offset)]) + 1
+
+    def _cursor_display_col(self, cursor):
+        """光标当前所在的 1 基显示列（按终端单元格计）"""
+        return self._offset_to_col(cursor.block().text(),
+                                   cursor.position() - cursor.block().position())
 
     def _terminal_wrap_line(self, cursor):
         """自动换行（DECAWM）：可打印字符写满右边距后，后续字符移到下一行行首
@@ -1218,17 +1276,34 @@ class SessionTab(QWidget):
             cursor.insertText('\n')
 
     def _write_printable_run(self, cursor, run):
-        """按终端语义写入一段可打印字符：行中覆盖、行尾追加、写满右边距自动换行"""
+        """按终端语义写入一段可打印字符：行中覆盖、行尾追加、写满右边距自动换行
+
+        列宽按单元格计（中文等宽字符占 2 格），避免含中文的行提前/滞后换行。
+        """
         cols = self._get_screen_cols()
         i = 0
         n = len(run)
         while i < n:
-            col = cursor.position() - cursor.block().position()
+            block = cursor.block()
+            line_text = block.text()
+            col = self._text_width(line_text[:cursor.position() - block.position()])
             if col >= cols:
                 self._terminal_wrap_line(cursor)
                 continue
-            take = min(n - i, cols - col)
-            seg = run[i:i + take]
+            # 取尽可能多的字符，使其显示宽度不超过剩余单元格；宽字符放不下就换行
+            remain = cols - col
+            width = 0
+            j = i
+            while j < n:
+                w = self._char_width(run[j])
+                if width + w > remain:
+                    break
+                width += w
+                j += 1
+            if j == i:
+                self._terminal_wrap_line(cursor)
+                continue
+            seg = run[i:j]
             block = cursor.block()
             block_end = block.position() + block.length() - 1
             if cursor.position() >= block_end:
@@ -1236,7 +1311,7 @@ class SessionTab(QWidget):
             else:
                 for ch in seg:
                     self._terminal_write_char(cursor, ch)
-            i += take
+            i = j
 
     def _insert_text_with_cr(self, cursor, text):
         """插入文本，按终端语义处理控制字符
@@ -1468,14 +1543,18 @@ class SessionTab(QWidget):
                 cursor.movePosition(MOVE.Down, MODE.MoveAnchor, row - 1)
 
         cursor.movePosition(MOVE.StartOfLine)
-        line_len = cursor.block().length() - 1  # 不含块分隔符
+        line_text = cursor.block().text()
+        line_width = self._text_width(line_text)
         target = col - 1
-        if target > line_len:
+        if target > line_width:
             # 目标列超出当前行内容：以空格填充空白单元格后再定位
             cursor.movePosition(MOVE.EndOfLine)
-            cursor.insertText(' ' * (target - line_len))
+            cursor.insertText(' ' * (target - line_width))
             cursor.movePosition(MOVE.StartOfLine)
-        cursor.movePosition(MOVE.Right, MODE.MoveAnchor, target)
+            line_text = cursor.block().text()
+        # 列按终端单元格计（中文占 2 格），换算成文档字符下标后再移动
+        cursor.movePosition(MOVE.Right, MODE.MoveAnchor,
+                            self._col_to_offset(line_text, col))
 
     @staticmethod
     def _alt_doc_delete_line(doc, idx):
@@ -1515,7 +1594,7 @@ class SessionTab(QWidget):
     def _alt_line_feed(self, cursor, reset_col=True):
         """备用屏幕下移一行（IND/NEL/LF 语义）：滚动区域底部时区域上滚一行"""
         top, bottom = self._scroll_region
-        col0 = cursor.position() - cursor.block().position()
+        col = self._cursor_display_col(cursor)
         row = cursor.block().blockNumber() + 1
         if row >= bottom:
             self._alt_ensure_lines(cursor, bottom)
@@ -1524,12 +1603,12 @@ class SessionTab(QWidget):
             target_row = bottom
         else:
             target_row = min(row + 1, self._screen_rows)
-        self._alt_move_to(cursor, target_row, 1 if reset_col else col0 + 1)
+        self._alt_move_to(cursor, target_row, 1 if reset_col else col)
 
     def _alt_reverse_index(self, cursor):
         """备用屏幕上移一行（RI，ESC M）：滚动区域顶部时区域下滚一行"""
         top, bottom = self._scroll_region
-        col0 = cursor.position() - cursor.block().position()
+        col = self._cursor_display_col(cursor)
         row = cursor.block().blockNumber() + 1
         if row <= top:
             self._alt_ensure_lines(cursor, bottom)
@@ -1538,31 +1617,31 @@ class SessionTab(QWidget):
             target_row = top
         else:
             target_row = max(1, row - 1)
-        self._alt_move_to(cursor, target_row, col0 + 1)
+        self._alt_move_to(cursor, target_row, col)
 
     def _alt_insert_lines(self, cursor, count):
         """IL（ESC[L）：光标行处插入 count 个空白行，区域底部行被丢弃"""
         top, bottom = self._scroll_region
         row = cursor.block().blockNumber() + 1
-        col0 = cursor.position() - cursor.block().position()
+        col = self._cursor_display_col(cursor)
         n = max(1, min(int(count), max(0, bottom - row + 1)))
         self._alt_ensure_lines(cursor, bottom)
         for _ in range(n):
             self._alt_doc_insert_blank_before(cursor.document(), row - 1)
             self._alt_doc_delete_line(cursor.document(), bottom)
-        self._alt_move_to(cursor, row, col0 + 1)
+        self._alt_move_to(cursor, row, col)
 
     def _alt_delete_lines(self, cursor, count):
         """DL（ESC[M）：删除光标行起 count 行，下方行上移，区域底部补空白行"""
         top, bottom = self._scroll_region
         row = cursor.block().blockNumber() + 1
-        col0 = cursor.position() - cursor.block().position()
+        col = self._cursor_display_col(cursor)
         n = max(1, min(int(count), max(0, bottom - row + 1)))
         self._alt_ensure_lines(cursor, bottom)
         for _ in range(n):
             self._alt_doc_delete_line(cursor.document(), row - 1)
             self._alt_doc_insert_blank_before(cursor.document(), bottom - 1)
-        self._alt_move_to(cursor, row, col0 + 1)
+        self._alt_move_to(cursor, row, col)
 
     def _alt_scroll_up(self, cursor, count):
         """SU（ESC[S）：滚动区域整体上滚 count 行，顶部丢弃、底部补空"""
@@ -1585,7 +1664,7 @@ class SessionTab(QWidget):
         MOVE = QTextCursor.MoveOperation
         MODE = QTextCursor.MoveMode
         row = cursor.block().blockNumber() + 1
-        col0 = cursor.position() - cursor.block().position()
+        col = self._cursor_display_col(cursor)
         saved_pos = cursor.position()
         doc = cursor.document()
 
@@ -1595,7 +1674,7 @@ class SessionTab(QWidget):
             cursor.removeSelectedText()
             if self._screen_rows > 1:
                 cursor.insertText('\n' * (self._screen_rows - 1))
-            self._alt_move_to(cursor, row, col0 + 1)
+            self._alt_move_to(cursor, row, col)
             return
 
         if mode == 1:
@@ -1612,14 +1691,17 @@ class SessionTab(QWidget):
             if row - 1 > 0:
                 cc.movePosition(MOVE.Down, MODE.MoveAnchor, row - 1)
             cc.movePosition(MOVE.StartOfLine)
-            cc.movePosition(MOVE.Right, MODE.KeepAnchor, min(col0 + 1, cc.block().length() - 1))
-            cc.insertText(' ' * len(cc.selectedText()))
+            cc.movePosition(MOVE.Right, MODE.KeepAnchor,
+                            min(saved_pos - cursor.block().position() + 1,
+                                cc.block().length() - 1))
+            # 以显示宽度决定空格数，保持宽字符行的列几何不变
+            cc.insertText(' ' * self._text_width(cc.selectedText()))
             cursor.setPosition(saved_pos)  # ED 不移动光标
         else:
             # 光标到文末：当前行光标到行尾填空格，下方所有行清空
             cc = QTextCursor(cursor)
             cc.movePosition(MOVE.EndOfLine, MODE.KeepAnchor)
-            cc.insertText(' ' * len(cc.selectedText()))
+            cc.insertText(' ' * self._text_width(cc.selectedText()))
             ec = QTextCursor(doc)
             ec.movePosition(MOVE.Start)
             if row < doc.blockCount():
@@ -1641,21 +1723,25 @@ class SessionTab(QWidget):
         """
         MODE = QTextCursor.MoveMode
         block_start = cursor.block().position()
-        line_len = cursor.block().length() - 1
-        cur_off = cursor.position() - block_start
+        line_text = cursor.block().text()
+        line_width = self._text_width(line_text)
+        cur_col = self._text_width(line_text[:cursor.position() - block_start])
         saved_pos = cursor.position()
         if mode == 2:
-            start_off, end_off = 0, line_len
+            start_w, end_w = 0, line_width
         elif mode == 1:
             # EL 1 擦除范围包含光标所在单元格
-            start_off, end_off = 0, min(cur_off + 1, line_len)
+            start_w, end_w = 0, min(cur_col + 1, line_width)
         else:
-            start_off, end_off = cur_off, line_len
-        if end_off > start_off:
+            start_w, end_w = cur_col, line_width
+        if end_w > start_w:
+            start_off = self._col_to_offset(line_text, start_w + 1)
+            end_off = self._col_to_offset(line_text, end_w + 1)
+            # 以等宽空格填充擦除区，保持行内字符的显示列不变
             cc = QTextCursor(cursor.document())
             cc.setPosition(block_start + start_off)
             cc.setPosition(block_start + end_off, MODE.KeepAnchor)
-            cc.insertText(' ' * (end_off - start_off))
+            cc.insertText(' ' * (end_w - start_w))
             cursor.setPosition(saved_pos)  # 擦除不移动光标（终端语义）
 
     def _normal_clear_screen(self, cursor):
@@ -1752,7 +1838,8 @@ class SessionTab(QWidget):
             if self._alt_screen_active:
                 # 备用屏幕：右侧为空白单元格时以空格填充后定位
                 row = cursor.block().blockNumber() + 1
-                col = cursor.position() - cursor.block().position() + 1
+                col = self._offset_to_col(cursor.block().text(),
+                                          cursor.position() - cursor.block().position())
                 self._alt_move_to(cursor, row, col + count)
             else:
                 # 主屏：右移不越过行尾（终端右边距语义，防止跨块错位）
@@ -1783,7 +1870,8 @@ class SessionTab(QWidget):
                     # VPA(d)/G：只定位行（d）或列（G），另一维保持
                     if end_char == 'd':
                         row = params[0] if params else 1
-                        col = cursor.position() - cursor.block().position() + 1
+                        col = self._offset_to_col(cursor.block().text(),
+                                                  cursor.position() - cursor.block().position())
                     else:
                         row = cursor.block().blockNumber() + 1
                         col = params[0] if params else 1

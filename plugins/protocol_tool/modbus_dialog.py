@@ -13,12 +13,13 @@ import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QSpinBox,
-    QPlainTextEdit, QGroupBox, QMessageBox, QCheckBox,
+    QPlainTextEdit, QGroupBox, QCheckBox,
     QSizePolicy
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QTextCursor
 
+from utils import dialog_helper
 from .modbus_protocol import (
     ModbusProtocolFactory, FUNC_NAMES,
     FUNC_READ_COILS, FUNC_READ_DISCRETE_INPUTS,
@@ -116,7 +117,6 @@ class ModbusDialog(QDialog):
         border_focus = self._get_style('border-focus', '#007acc')
         border_radius = self._get_border_radius('sm', '4px')
         font_size = self._get_font_size('size-md', '12px')
-        unified_btn = self._get_button_css('button') if self._config_manager else ''
 
         self.setStyleSheet(f"""
             QDialog {{ background-color: {bg_main}; }}
@@ -130,6 +130,36 @@ class ModbusDialog(QDialog):
                 font-size: {font_size};
             }}
             QLineEdit:focus, QSpinBox:focus {{ border-color: {border_focus}; }}
+            /* 数值输入框保留步进按钮，使用主题箭头，避免深色主题下露出浅色原生箭头 */
+            QSpinBox {{ padding-right: 22px; }}
+            QSpinBox::up-button {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 16px;
+                background-color: {bg_input};
+                border-left: 1px solid {border_light};
+                border-top-right-radius: {border_radius};
+            }}
+            QSpinBox::down-button {{
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 16px;
+                background-color: {bg_input};
+                border-left: 1px solid {border_light};
+                border-bottom-right-radius: {border_radius};
+            }}
+            QSpinBox::up-arrow {{
+                width: 0px; height: 0px;
+                border-left: 3px solid transparent;
+                border-right: 3px solid transparent;
+                border-bottom: 4px solid {text_secondary};
+            }}
+            QSpinBox::down-arrow {{
+                width: 0px; height: 0px;
+                border-left: 3px solid transparent;
+                border-right: 3px solid transparent;
+                border-top: 4px solid {text_secondary};
+            }}
             QComboBox {{
                 background-color: {bg_input};
                 color: {text_primary};
@@ -139,7 +169,7 @@ class ModbusDialog(QDialog):
                 font-size: {font_size};
                 min-width: 180px;
             }}
-            QComboBox:hover {{ border-color: {border_focus}; }}
+            QComboBox:hover, QComboBox:focus {{ border-color: {border_focus}; }}
             QComboBox::drop-down {{ border: none; width: 20px; }}
             QComboBox::down-arrow {{ image: url({_DOWN_ARROW_IMG}); }}
             QComboBox QAbstractItemView {{
@@ -181,8 +211,12 @@ class ModbusDialog(QDialog):
                 font-weight: bold;
                 border-radius: {border_radius};
             }}
-            {unified_btn}
         """)
+
+        # 按钮层级：确定/封装/解析用主色，关闭用次要色
+        for btn in self.findChildren(QPushButton):
+            kind = btn.property('btn_kind') or 'secondary'
+            btn.setStyleSheet(self._get_button_css(kind))
 
     # ========== UI 构建 ==========
     def _init_ui(self):
@@ -253,8 +287,10 @@ class ModbusDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         build_btn = QPushButton("封装")
+        build_btn.setProperty('btn_kind', 'button')
         build_btn.clicked.connect(self._do_build)
         close_btn = QPushButton("关闭")
+        close_btn.setProperty('btn_kind', 'button-secondary')
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(build_btn)
         btn_row.addWidget(close_btn)
@@ -297,8 +333,10 @@ class ModbusDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         parse_btn = QPushButton("解析")
+        parse_btn.setProperty('btn_kind', 'button')
         parse_btn.clicked.connect(self._do_parse)
         close_btn = QPushButton("关闭")
+        close_btn.setProperty('btn_kind', 'button-secondary')
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(parse_btn)
         btn_row.addWidget(close_btn)
@@ -352,13 +390,13 @@ class ModbusDialog(QDialog):
             self.result_text.setPlainText(hex_str)
 
         except Exception as e:
-            QMessageBox.warning(self, "封装失败", str(e))
+            dialog_helper.show_warning(self, "封装失败", str(e), self._config_manager)
 
     def _parse_values(self, func_code):
         """解析写入值输入框"""
         text = self.values_input.text().strip()
         if not text:
-            QMessageBox.warning(self, "输入错误", "请输入写入值")
+            dialog_helper.show_warning(self, "输入错误", "请输入写入值", self._config_manager)
             return None
 
         try:
@@ -377,7 +415,7 @@ class ModbusDialog(QDialog):
                 # 寄存器值列表
                 return [int(p) & 0xFFFF for p in parts]
         except (ValueError, IndexError) as e:
-            QMessageBox.warning(self, "输入错误", f"写入值格式无效：{e}")
+            dialog_helper.show_warning(self, "输入错误", f"写入值格式无效：{e}", self._config_manager)
             return None
 
     def get_result_hex(self):
@@ -389,19 +427,19 @@ class ModbusDialog(QDialog):
         """执行解析"""
         hex_text = self.input_text.toPlainText().strip()
         if not hex_text:
-            QMessageBox.warning(self, "解析失败", "请输入待解析的报文")
+            dialog_helper.show_warning(self, "解析失败", "请输入待解析的报文", self._config_manager)
             return
 
         try:
             data = self._hex_to_bytes(hex_text)
             if not data:
-                QMessageBox.warning(self, "解析失败", "Hex 格式无效")
+                dialog_helper.show_warning(self, "解析失败", "Hex 格式无效", self._config_manager)
                 return
 
             proto_type = self.proto_combo.currentData()
             protocol = self._identify_protocol(data, proto_type)
             if protocol is None:
-                QMessageBox.warning(self, "解析失败", "无法识别协议类型")
+                dialog_helper.show_warning(self, "解析失败", "无法识别协议类型", self._config_manager)
                 return
 
             result = protocol.parse(data)
@@ -409,7 +447,7 @@ class ModbusDialog(QDialog):
             self.result_text.setPlainText(formatted)
 
         except Exception as e:
-            QMessageBox.warning(self, "解析失败", str(e))
+            dialog_helper.show_warning(self, "解析失败", str(e), self._config_manager)
 
     def _hex_to_bytes(self, hex_text):
         """将 Hex 字符串转换为字节串"""

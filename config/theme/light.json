@@ -56,8 +56,17 @@
         "lg": "8px",
         "xl": "12px"
     },
+
+    "label_widths": {
+        "xs": "48px",
+        "md": "96px"
+    },
     
     "components": {
+        "status-bar": {
+            "bg": "@bg-tertiary",
+            "color": "@text"
+        },
         "button": {
             "bg": "@primary",
             "color": "#ffffff",

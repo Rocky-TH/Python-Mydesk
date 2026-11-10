@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 # 下拉框三角形箭头图片路径
 _DOWN_ARROW_IMG = os.path.join(
@@ -50,8 +50,14 @@ class CompileToolWidget(QWidget):
         self._plugin_manager = plugin_manager
         self._remote_cmd_plugin = None
         self._current_connection = None
+        self._detail_state = 'success'
         self.compile_config = self.load_compile_config()
         self.init_ui()
+
+        # F5 触发编译（仅在本插件内生效）
+        self._compile_shortcut = QShortcut(QKeySequence("F5"), self)
+        self._compile_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._compile_shortcut.activated.connect(self.on_compile)
 
     def _get_remote_cmd_plugin(self):
         """获取 RemoteCmd 插件实例"""
@@ -89,6 +95,23 @@ class CompileToolWidget(QWidget):
         if self._config_manager:
             return self._config_manager.get_border_radius(key, default)
         return default
+
+    def get_label_width(self, key='md', default=96):
+        """获取标签固定宽度令牌（像素整数）"""
+        if self._config_manager:
+            return self._config_manager.get_label_width(key, default)
+        return default
+
+    def _apply_detail_style(self):
+        """按当前状态刷新详情标签颜色（成功/失败），不重建语义状态。"""
+        if not hasattr(self, 'detail_text'):
+            return
+        color_key = 'text-danger' if self._detail_state == 'error' else 'text-success'
+        color = self.get_style(color_key, '#4ec9b0')
+        font_size = self.get_font_size('size-sm', '11px')
+        self.detail_text.setStyleSheet(
+            f"color: {color}; font-size: {font_size}; font-weight: 500;"
+        )
 
     def get_button_css(self, button_type='button'):
         """获取按钮的统一 CSS 样式
@@ -319,7 +342,7 @@ class CompileToolWidget(QWidget):
 
         env_label = QLabel("编译环境:")
         env_label.setStyleSheet(label_style)
-        env_label.setFixedWidth(80)
+        env_label.setFixedWidth(self.get_label_width('md', 96))
         env_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         options_layout.addWidget(env_label)
         self.compile_env_combo = QComboBox()
@@ -333,7 +356,7 @@ class CompileToolWidget(QWidget):
 
         comp_label = QLabel("编译组件:")
         comp_label.setStyleSheet(label_style)
-        comp_label.setFixedWidth(80)
+        comp_label.setFixedWidth(self.get_label_width('md', 96))
         comp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         options_layout.addWidget(comp_label)
         self.compile_component_combo = QComboBox()
@@ -347,7 +370,7 @@ class CompileToolWidget(QWidget):
 
         test_label = QLabel("测试环境:")
         test_label.setStyleSheet(label_style)
-        test_label.setFixedWidth(80)
+        test_label.setFixedWidth(self.get_label_width('md', 96))
         test_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         options_layout.addWidget(test_label)
         self.test_env_combo = QComboBox()
@@ -368,12 +391,10 @@ class CompileToolWidget(QWidget):
         detail_layout.setSpacing(2)
 
         self.detail_text = QLabel("选择编译环境后显示详细配置信息")
-        text_success = self.get_style('text-success', '#00ff00')
-        font_size = self.get_font_size('size-md', '12px')
-        self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {font_size}; font-weight: 500;")
         self.detail_text.setWordWrap(True)
         self.detail_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail_layout.addWidget(self.detail_text)
+        self._apply_detail_style()
 
         layout.addWidget(detail_group)
 
@@ -442,7 +463,6 @@ class CompileToolWidget(QWidget):
         if not hasattr(self, '_style_widgets'):
             return
         text_primary = self.get_style('text', '#e0e0e0')
-        text_success = self.get_style('text-success', '#4ec9b0')
         font_size = self.get_font_size('size-md', '12px')
         # 刷新GroupBox样式
         for widget in self.findChildren(QGroupBox):
@@ -463,11 +483,8 @@ class CompileToolWidget(QWidget):
         label_style = f"color: {text_primary}; font-size: {font_size}; font-weight: 500;"
         for label in self.findChildren(QLabel):
             label.setStyleSheet(label_style)
-        # detail_text 使用绿色（text-success），放在最后避免被覆盖
-        if 'detail_text' in self._style_widgets:
-            self._style_widgets['detail_text'].setStyleSheet(
-                f"color: {text_success}; font-size: {font_size}; font-weight: 500;"
-            )
+        # detail_text 按当前状态（成功/失败）刷新颜色，放在最后避免被统一标签样式覆盖
+        self._apply_detail_style()
 
     def _set_tool_status(self, text):
         """通过框架统一状态接口上报工具状态"""
@@ -489,8 +506,8 @@ class CompileToolWidget(QWidget):
                 info += f"\n说明: {desc}"
 
             self.detail_text.setText(info)
-            text_success = self.get_style('text_success', '#00ff00')
-            self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {self.get_font_size('small', '11px')};")
+            self._detail_state = 'success'
+            self._apply_detail_style()
 
     def _auto_connect_and_discover_components(self, env_data):
         """自动连接到编译环境并发现组件"""
@@ -505,17 +522,17 @@ class CompileToolWidget(QWidget):
 
             success, msg = remote_cmd.connect(env_name)
             if success:
-                text_success = self.get_style('text_success', '#00ff00')
                 self.detail_text.setText(self.detail_text.text() + f"\n{msg}")
-                self.detail_text.setStyleSheet(f"color: {text_success}; font-size: {self.get_font_size('small', '11px')};")
+                self._detail_state = 'success'
+                self._apply_detail_style()
                 self._current_connection = env_name
 
                 path = env_data.get('path', '.')
                 self._discover_components(path)
             else:
-                text_error = self.get_style('text_error', '#ff6b6b')
                 self.detail_text.setText(self.detail_text.text() + f"\n[连接失败] {msg}")
-                self.detail_text.setStyleSheet(f"color: {text_error}; font-size: {self.get_font_size('small', '11px')};")
+                self._detail_state = 'error'
+                self._apply_detail_style()
         else:
             path = env_data.get('path', '.')
             self._discover_components(path)
@@ -568,7 +585,22 @@ class CompileToolWidget(QWidget):
             self.compile_component_combo.addItem(comp['name'], comp)
         self.compile_component_combo.blockSignals(False)
 
+    def _run_busy(self, button, busy_text, idle_text, action):
+        """执行前禁用按钮并展示忙碌文案，结束后恢复，防止重复点击。"""
+        if not button.isEnabled():
+            return
+        button.setEnabled(False)
+        button.setText(busy_text)
+        try:
+            action()
+        finally:
+            button.setEnabled(True)
+            button.setText(idle_text)
+
     def on_compile(self):
+        self._run_busy(self.compile_btn, "编译中...", "开始编译", self._do_compile)
+
+    def _do_compile(self):
         """编译按钮点击"""
         self.compile_output.clear()
         self._set_tool_status("编译中...")
@@ -604,6 +636,9 @@ class CompileToolWidget(QWidget):
         self._set_tool_status("编译完成")
 
     def on_test(self):
+        self._run_busy(self.test_btn, "测试中...", "运行测试", self._do_test)
+
+    def _do_test(self):
         """运行测试"""
         self.compile_output.clear()
         self._set_tool_status("测试中...")
@@ -623,6 +658,9 @@ class CompileToolWidget(QWidget):
         self._set_tool_status("测试完成")
 
     def on_clean(self):
+        self._run_busy(self.clean_btn, "清理中...", "清理", self._do_clean)
+
+    def _do_clean(self):
         """清理按钮点击"""
         self.compile_output.clear()
         self._set_tool_status("就绪")

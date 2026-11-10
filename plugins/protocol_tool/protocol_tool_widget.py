@@ -12,12 +12,13 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QPlainTextEdit,
-    QComboBox, QGroupBox, QMessageBox, QCheckBox,
-    QSpinBox, QFileDialog, QFrame, QSizePolicy
+    QComboBox, QGroupBox, QCheckBox,
+    QSpinBox, QAbstractSpinBox, QFrame, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QTextCursor
 
+from utils import dialog_helper
 from .connections import (
     SerialConnection, TCPClientConnection, TCPServerConnection,
     list_serial_ports, append_crc16_modbus, crc16_modbus
@@ -56,6 +57,9 @@ class HexPlainTextEdit(QPlainTextEdit):
 
     _ALLOWED_CHARS = set('0123456789ABCDEFabcdef ')
 
+    # Ctrl+Enter 请求发送（由宿主窗口连接到发送槽）
+    send_requested = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hex_mode = False
@@ -67,6 +71,11 @@ class HexPlainTextEdit(QPlainTextEdit):
         return all(c in self._ALLOWED_CHARS for c in text)
 
     def keyPressEvent(self, event):
+        # Ctrl+Enter / Ctrl+Return 触发发送
+        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.send_requested.emit()
+            return
         if self._hex_mode:
             text = event.text()
             # 仅对有可见文本输入的按键做过滤；控制键（退格、删除、方向键等
@@ -157,6 +166,12 @@ class ProtocolToolWidget(QWidget):
     def _get_border_radius(self, key, default='4px'):
         if self._config_manager:
             return self._config_manager.get_border_radius(key, default)
+        return default
+
+    def _get_label_width(self, key='md', default=96):
+        """获取标签固定宽度令牌（像素整数）。"""
+        if self._config_manager:
+            return self._config_manager.get_label_width(key, default)
         return default
 
     def _get_button_css(self, button_type='button'):
@@ -268,8 +283,12 @@ class ProtocolToolWidget(QWidget):
         border_light = self._get_style('border-light', '#4a4a4d')
         border_focus = self._get_style('border-focus', '#007acc')
         bg_input_focus = self._get_style('bg-input-focus', '#4c4c4c')
+        text_secondary = self._get_style('text-secondary', '#cccccc')
         border_radius = self._get_border_radius('sm', '4px')
         font_size = self._get_font_size('size-md', '12px')
+        arrow = (f"width: 0px; height: 0px; "
+                 f"border-left: 3px solid transparent; "
+                 f"border-right: 3px solid transparent;")
         return f"""
             QSpinBox {{
                 background-color: {bg_input};
@@ -283,15 +302,33 @@ class ProtocolToolWidget(QWidget):
                 height: 28px;
             }}
             QSpinBox:focus {{ border-color: {border_focus}; background-color: {bg_input_focus}; }}
-            /* 隐藏增减箭头按钮（按项目之前要求：取消输入框的增加和减小功能）*/
-            QSpinBox::up-button, QSpinBox::down-button {{
-                width: 0px;
-                height: 0px;
-                border: none;
+            /* 数值类输入框保留步进按钮，但使用主题箭头，避免深色主题下露出浅色原生箭头 */
+            QSpinBox::up-button {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 18px;
+                background-color: {bg_input};
+                border-left: 1px solid {border_light};
+                border-top-right-radius: {border_radius};
             }}
-            QSpinBox::up-arrow, QSpinBox::down-arrow {{
-                width: 0px;
-                height: 0px;
+            QSpinBox::down-button {{
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 18px;
+                background-color: {bg_input};
+                border-left: 1px solid {border_light};
+                border-bottom-right-radius: {border_radius};
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background-color: {bg_input_focus};
+            }}
+            QSpinBox::up-arrow {{
+                {arrow}
+                border-bottom: 4px solid {text_secondary};
+            }}
+            QSpinBox::down-arrow {{
+                {arrow}
+                border-top: 4px solid {text_secondary};
             }}
         """
 
@@ -397,9 +434,11 @@ class ProtocolToolWidget(QWidget):
         label_style = f"color: {text_primary}; font-size: {font_size}; font-weight: 500;"
 
         # 连接类型
+        label_width = self._get_label_width('xs', 48)
         type_label = QLabel("类型:")
         type_label.setStyleSheet(label_style)
-        type_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        type_label.setFixedWidth(label_width)
+        type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(type_label)
 
         self.conn_type_combo = QComboBox()
@@ -411,7 +450,8 @@ class ProtocolToolWidget(QWidget):
         # 串口相关控件
         self.port_label = QLabel("串口:")
         self.port_label.setStyleSheet(label_style)
-        self.port_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.port_label.setFixedWidth(label_width)
+        self.port_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.port_label)
 
         self.serial_port_combo = QComboBox()
@@ -427,7 +467,8 @@ class ProtocolToolWidget(QWidget):
 
         self.baud_label = QLabel("波特率:")
         self.baud_label.setStyleSheet(label_style)
-        self.baud_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.baud_label.setFixedWidth(label_width)
+        self.baud_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.baud_label)
 
         self.baud_combo = QComboBox()
@@ -439,7 +480,8 @@ class ProtocolToolWidget(QWidget):
         # TCP 相关控件
         self.host_label = QLabel("主机:")
         self.host_label.setStyleSheet(label_style)
-        self.host_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.host_label.setFixedWidth(label_width)
+        self.host_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.host_label)
 
         self.host_input = QLineEdit()
@@ -450,11 +492,14 @@ class ProtocolToolWidget(QWidget):
 
         self.port_input_label = QLabel("端口:")
         self.port_input_label.setStyleSheet(label_style)
-        self.port_input_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.port_input_label.setFixedWidth(label_width)
+        self.port_input_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.port_input_label)
 
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
+        # 端口属于精确数值，不需要步进按钮
+        self.port_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.port_spin.setValue(self.config.get('settings', {}).get('default_tcp_port', 8080))
         self.port_spin.setStyleSheet(self._get_spinbox_style())
         layout.addWidget(self.port_spin)
@@ -524,6 +569,7 @@ class ProtocolToolWidget(QWidget):
         self.send_text = HexPlainTextEdit()
         self.send_text.setStyleSheet(self._get_plain_text_edit_style(read_only=False))
         self.send_text.setPlaceholderText("输入要发送的内容（字符串或十六进制，如 01 03 00 01）...")
+        self.send_text.send_requested.connect(self._on_send)
         send_layout.addLayout(self._create_send_toolbar())
         send_layout.addWidget(self.send_text)
         splitter.addWidget(send_widget)
@@ -978,15 +1024,16 @@ class ProtocolToolWidget(QWidget):
         for frame in self.findChildren(QFrame):
             if frame.objectName() == 'protocol_status_bar':
                 frame.setStyleSheet(self._get_status_bar_style())
-        # 按钮（按类型刷新）
+        # 按钮（按控件引用刷新，避免主题切换覆盖连接状态等语义色）
         btn_css = self._get_button_css('button-secondary')
         for btn in self.findChildren(QPushButton):
-            text = btn.text()
-            if text == "发送":
-                btn.setStyleSheet(self._get_button_css('button'))
-            elif text == "连接":
-                btn.setStyleSheet(self._get_button_css('button-success' if not self._is_connected else 'button-danger'))
+            if btn is getattr(self, 'connect_btn', None):
+                btn.setStyleSheet(self._get_button_css(
+                    'button-danger' if self._is_connected else 'button-success'
+                ))
                 btn.setText("断开" if self._is_connected else "连接")
+            elif btn is getattr(self, 'send_btn', None):
+                btn.setStyleSheet(self._get_button_css('button'))
             else:
                 btn.setStyleSheet(btn_css)
 
@@ -1046,8 +1093,16 @@ class ProtocolToolWidget(QWidget):
     def _on_connect_clicked(self):
         if self._is_connected:
             self._do_disconnect()
-        else:
+            return
+        # 连接中禁用按钮并给出忙碌反馈，防止重复点击
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("连接中...")
+        try:
             self._do_connect()
+        finally:
+            self.connect_btn.setEnabled(True)
+            if not self._is_connected:
+                self._reset_connect_button()
 
     def _do_connect(self):
         conn_type = self.conn_type_combo.currentIndex()
@@ -1329,8 +1384,8 @@ class ProtocolToolWidget(QWidget):
         except Exception:
             pass
 
-        chosen = QFileDialog.getExistingDirectory(
-            self, "选择日志保存目录", default_dir
+        chosen = dialog_helper.get_existing_directory(
+            self, "选择日志保存目录", default_dir, self._config_manager
         )
         if not chosen:
             return
@@ -1370,7 +1425,7 @@ class ProtocolToolWidget(QWidget):
             self._plugin_manager_ref.set_tool_status('ProtocolTool', status_text)
 
     def _show_error(self, message):
-        QMessageBox.warning(self, "协议测试", message)
+        dialog_helper.show_warning(self, "协议测试", message, self._config_manager)
 
     # ========== 清理 ==========
     def closeEvent(self, event):

@@ -151,6 +151,12 @@ class CalcToolWidget(QWidget):
             return self._config_manager.get_border_radius(key, default)
         return default
 
+    def get_label_width(self, key='md', default=96):
+        """获取标签固定宽度令牌（像素整数）"""
+        if self._config_manager:
+            return self._config_manager.get_label_width(key, default)
+        return default
+
     def get_button_css(self, button_type='button'):
         if self._config_manager:
             return self._config_manager.get_button_css(button_type)
@@ -470,7 +476,7 @@ class CalcToolWidget(QWidget):
         mode_layout.setSpacing(4)
         mode_label = QLabel("模式:")
         mode_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        mode_label.setFixedWidth(96)
+        mode_label.setFixedWidth(self.get_label_width('md', 96))
         mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mode_layout.addWidget(mode_label)
 
@@ -550,7 +556,7 @@ class CalcToolWidget(QWidget):
 
         prog_width_label = QLabel("位宽:")
         prog_width_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size};")
-        prog_width_label.setFixedWidth(48)
+        prog_width_label.setFixedWidth(self.get_label_width('xs', 48))
         prog_width_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_width_combo = QComboBox()
         self.prog_width_combo.addItems(["字节 (8位)", "字 (16位)", "双字 (32位)", "四字 (64位)"])
@@ -560,7 +566,7 @@ class CalcToolWidget(QWidget):
 
         prog_sign_label = QLabel("十进制:")
         prog_sign_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size};")
-        prog_sign_label.setFixedWidth(48)
+        prog_sign_label.setFixedWidth(self.get_label_width('xs', 48))
         prog_sign_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_sign_combo = QComboBox()
         self.prog_sign_combo.addItems(["无符号", "有符号"])
@@ -581,7 +587,7 @@ class CalcToolWidget(QWidget):
 
         self.prog_dec_label = QLabel("十进制:")
         self.prog_dec_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size};")
-        self.prog_dec_label.setFixedWidth(96)
+        self.prog_dec_label.setFixedWidth(self.get_label_width('md', 96))
         self.prog_dec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_dec_value = QLineEdit()
         self.prog_dec_value.setReadOnly(True)
@@ -591,7 +597,7 @@ class CalcToolWidget(QWidget):
 
         self.prog_bin_label = QLabel("二进制:")
         self.prog_bin_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size};")
-        self.prog_bin_label.setFixedWidth(96)
+        self.prog_bin_label.setFixedWidth(self.get_label_width('md', 96))
         self.prog_bin_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_bin_value = QLineEdit()
         self.prog_bin_value.setReadOnly(True)
@@ -601,7 +607,7 @@ class CalcToolWidget(QWidget):
 
         self.prog_hex_label = QLabel("十六进制:")
         self.prog_hex_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size};")
-        self.prog_hex_label.setFixedWidth(96)
+        self.prog_hex_label.setFixedWidth(self.get_label_width('md', 96))
         self.prog_hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.prog_hex_value = QLineEdit()
         self.prog_hex_value.setReadOnly(True)
@@ -1193,7 +1199,7 @@ class CalcToolWidget(QWidget):
 
         dec_label = QLabel("十进制:")
         dec_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        dec_label.setFixedWidth(96)
+        dec_label.setFixedWidth(self.get_label_width('md', 96))
         dec_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.dec_input = QLineEdit()
         self.dec_input.setPlaceholderText("输入十进制数值...")
@@ -1204,7 +1210,7 @@ class CalcToolWidget(QWidget):
 
         bin_label = QLabel("二进制:")
         bin_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        bin_label.setFixedWidth(96)
+        bin_label.setFixedWidth(self.get_label_width('md', 96))
         bin_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.bin_input = QLineEdit()
         self.bin_input.setPlaceholderText("输入二进制 (如: 0b1010)")
@@ -1215,7 +1221,7 @@ class CalcToolWidget(QWidget):
 
         hex_label = QLabel("十六进制:")
         hex_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        hex_label.setFixedWidth(96)
+        hex_label.setFixedWidth(self.get_label_width('md', 96))
         hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hex_input = QLineEdit()
         self.hex_input.setPlaceholderText("输入十六进制 (如: 0xFF)")
@@ -1242,7 +1248,7 @@ class CalcToolWidget(QWidget):
         hex_row.setSpacing(8)
         hex_label = QLabel("十六进制数组:")
         hex_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        hex_label.setFixedWidth(96)
+        hex_label.setFixedWidth(self.get_label_width('md', 96))
         hex_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hex_row.addWidget(hex_label)
 
@@ -1258,7 +1264,7 @@ class CalcToolWidget(QWidget):
         str_row.setSpacing(8)
         str_label = QLabel("字符串:")
         str_label.setStyleSheet(f"color: {text_primary}; font-size: {font_size}; font-weight: 500;")
-        str_label.setFixedWidth(96)
+        str_label.setFixedWidth(self.get_label_width('md', 96))
         str_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         str_row.addWidget(str_label)
 

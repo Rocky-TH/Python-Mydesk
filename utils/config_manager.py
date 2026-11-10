@@ -109,7 +109,7 @@ class ConfigManager:
             if not plugin_name:
                 continue
             
-            # 插件配置文件名: {name}_config.json (如 terminal_config.json, quickly_cmd_config.json)
+            # 插件配置文件名: {name}_config.json (如 terminal_config.json)
             config_filename = f"{plugin_name.lower()}_config.json"
             config_file = os.path.join(self._config_dir, config_filename)
             
@@ -497,6 +497,21 @@ class ConfigManager:
             return radius.get(old_key_map[key], default)
         
         return default
+
+    def get_label_width(self, key: str = 'md', default: int = 96) -> int:
+        """获取标签固定宽度（像素整数，供 setFixedWidth 直接使用）。
+
+        宽度令牌定义在主题配置的 label_widths 中（如 "48px"），
+        缺失或非法时回退到 default。
+        """
+        widths = self.get_current_theme_config().get('label_widths', {})
+        value = widths.get(key, None) if isinstance(widths, dict) else None
+        if isinstance(value, str):
+            import re
+            match = re.match(r'^(\d+)px$', value.strip())
+            if match and int(match.group(1)) > 0:
+                return int(match.group(1))
+        return default
     
     def get_component_style(self, component_name: str) -> Dict[str, Any]:
         """获取指定组件的样式配置"""
@@ -619,6 +634,23 @@ class ConfigManager:
             }}
         """
         return css
+    
+    def get_combo_arrow_css(self) -> str:
+        """获取下拉框箭头的统一 CSS（用 CSS 绘制三角形，颜色随主题变化）。
+
+        初始化与主题刷新路径共用此片段，避免主题切换后箭头规则丢失；
+        同时避免单一浅色图片在浅色主题下几乎不可见的问题。
+        """
+        arrow_color = self.get_color('text-secondary', '#cccccc')
+        return f"""
+            QComboBox::down-arrow {{
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid {arrow_color};
+            }}
+        """
     
     def resolve_style_value(self, value: str) -> str:
         """解析样式值中的变量引用，支持两种格式：${xxx} 和 @xxx"""
