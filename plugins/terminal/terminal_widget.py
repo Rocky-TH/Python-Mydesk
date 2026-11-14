@@ -2609,7 +2609,7 @@ class SessionTab(QWidget):
                 # 默认开启连接保活，避免长时间空闲被 NAT/防火墙超时断开
                 # 保活间隔由「终端 → 保活时间」菜单配置（默认 5 分钟）
                 keepalive_interval = self._get_keepalive_interval()
-                keepalive_state, keepalive_error = self._apply_keepalive(
+                keepalive_state, keepalive_error = _apply_keepalive_to(
                     strategy, conn_type, keepalive_interval)
                 # 连接成功 banner（双方地址、协议、时间等），先于服务器初始输出显示
                 self._write_connect_banner(conn_type, config, strategy,
@@ -2629,7 +2629,7 @@ class SessionTab(QWidget):
             else:
                 self.interactive_mode = False
                 keepalive_interval = self._get_keepalive_interval()
-                keepalive_state, keepalive_error = self._apply_keepalive(
+                keepalive_state, keepalive_error = _apply_keepalive_to(
                     strategy, conn_type, keepalive_interval)
                 self._write_connect_banner(conn_type, config, strategy,
                                            keepalive_interval,
