@@ -36,11 +36,10 @@ def settle(sec=0.35):
 
 
 def capture():
-    count = win.plugin_tabs.count()
-    for i in range(count):
-        w = win.plugin_tabs.widget(i)
-        tab_name = win.plugin_tabs.tabText(i).replace('/', '_')
-        win.plugin_tabs.setCurrentIndex(i)
+    for plugin_name in list(win._tool_plugin_order):
+        w = win.plugin_widgets[plugin_name]
+        display_name = win._plugin_display_name(plugin_name).replace('/', '_')
+        win.switch_to_plugin(plugin_name)
         app.processEvents()
         # 计算工具：切到程序员模式，输入 255 演示
         if w.__class__.__name__ == 'CalcToolWidget':
@@ -54,11 +53,11 @@ def capture():
                 print('calc setup err:', e)
         settle()
         pix = win.grab()
-        path = os.path.join(outdir, f'MyDesk_{tab_name}.png')
+        path = os.path.join(outdir, f'MyDesk_{display_name}.png')
         pix.save(path)
         print('saved:', path, flush=True)
 
-    # 调测工具默认不显示 tab，单独抓取
+    # 调测工具默认不占工具位，单独抓取
     debug_w = win.plugin_widgets.get('DebugTool')
     if debug_w is not None:
         settle()

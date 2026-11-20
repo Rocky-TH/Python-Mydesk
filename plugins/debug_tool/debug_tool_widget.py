@@ -56,7 +56,12 @@ class DebugToolPlugin:
         self.name = config['name']
         self.display_name = config.get('display_name', config['name'])
         self.widget = None
-        self._tab_visible = False  # 默认不显示 tab
+        # 显示状态持久化在 debugtool_config.json 的 settings.visible，重启后恢复
+        self._tab_visible = False
+        if self._config_manager:
+            self._tab_visible = bool(
+                self._config_manager.get_plugin_setting(self.name, 'visible', False)
+            )
 
     def get_widget(self):
         if self.widget is None:
@@ -69,9 +74,9 @@ class DebugToolPlugin:
     def deactivate(self):
         pass
 
-    def register_menus(self, registry):
-        """注册菜单项：通过菜单控制调测工具 tab 的显示/隐藏"""
-        builder = registry.add_menu(self.name, "调测(&D)")
+    def register_settings(self, registry):
+        """注册设置项：在「设置 → 调测工具」下控制调测工具视图的显示/隐藏"""
+        builder = registry.add_settings_menu(self.name, self.display_name)
         builder.add_action(
             "显示调测工具",
             lambda checked: self._toggle_tab_visibility(checked),
@@ -80,36 +85,20 @@ class DebugToolPlugin:
         )
 
     def _toggle_tab_visibility(self, visible):
-        """切换调测工具 tab 的显示/隐藏"""
+        """切换调测工具视图的显示/隐藏，并把显示状态写入插件配置"""
         self._tab_visible = visible
-        # 通过 plugin_manager 找到 main_window 并操作 tab
-        if self._plugin_manager:
-            # plugin_manager 的 status_callback 通常绑定到 main_window
-            # 但这里需要直接操作 main_window，通过遍历 widget 的 parent 链
-            widget = self.get_widget()
-            parent = widget.parent()
-            while parent is not None:
-                if hasattr(parent, 'plugin_tabs') and hasattr(parent, 'plugin_widgets'):
-                    self._update_tab(parent, visible)
-                    return
-                parent = parent.parent()
-
-    def _update_tab(self, main_window, visible):
-        """在 main_window 中添加或移除调测工具 tab"""
+        if self._config_manager:
+            self._config_manager.set_plugin_setting(self.name, 'visible', bool(visible))
+            self._config_manager.save_plugin_config(self.name)
+        if not self._plugin_manager:
+            return
+        main_window = getattr(self._plugin_manager, 'main_window', None)
+        if main_window is None:
+            return
         if visible:
-            if self.name not in main_window.plugin_widgets:
-                widget = self.get_widget()
-                main_window.plugin_widgets[self.name] = widget
-                main_window.plugin_tabs.addTab(widget, self.display_name)
+            main_window.add_plugin_view(self.name)
         else:
-            if self.name in main_window.plugin_widgets:
-                widget = main_window.plugin_widgets[self.name]
-                # 找到 tab 索引并移除
-                for i in range(main_window.plugin_tabs.count()):
-                    if main_window.plugin_tabs.widget(i) is widget:
-                        main_window.plugin_tabs.removeTab(i)
-                        break
-                # 不从 plugin_widgets 中删除，以便下次能再显示
+            main_window.remove_plugin_view(self.name)
 
 
 class DebugToolWidget(QWidget):

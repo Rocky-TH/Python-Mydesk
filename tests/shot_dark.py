@@ -48,27 +48,23 @@ def shoot(name):
 
 def capture():
     # 终端页（深色）
-    for i in range(win.plugin_tabs.count()):
-        if win.plugin_tabs.tabText(i) == '终端':
-            win.plugin_tabs.setCurrentIndex(i)
-            settle()
-            shoot('MyDesk_终端_深色.png')
+    win.switch_to_plugin('Terminal')
+    settle()
+    shoot('MyDesk_终端_深色.png')
     # 计算工具页（深色 + 程序员模式示例）
-    for i in range(win.plugin_tabs.count()):
-        if win.plugin_tabs.tabText(i) == '计算工具':
-            win.plugin_tabs.setCurrentIndex(i)
-            app.processEvents()
-            w = win.plugin_tabs.widget(i)
-            try:
-                w.calc_mode_combo.setCurrentIndex(1)
-                w.prog_width_combo.setCurrentIndex(0)
-                w.prog_sign_combo.setCurrentIndex(1)
-                for ch in '255':
-                    w._on_calc_input(ch)
-            except Exception as e:
-                print('calc err:', e)
-            settle()
-            shoot('MyDesk_计算工具_深色.png')
+    win.switch_to_plugin('CalcTool')
+    app.processEvents()
+    w = win.plugin_widgets['CalcTool']
+    try:
+        w.calc_mode_combo.setCurrentIndex(1)
+        w.prog_width_combo.setCurrentIndex(0)
+        w.prog_sign_combo.setCurrentIndex(1)
+        for ch in '255':
+            w._on_calc_input(ch)
+    except Exception as e:
+        print('calc err:', e)
+    settle()
+    shoot('MyDesk_计算工具_深色.png')
     app.quit()
 
 

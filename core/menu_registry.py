@@ -1,18 +1,22 @@
 """菜单注册机制
 
-框架提供的菜单注册器，允许插件按需向主窗口菜单栏注册菜单项。
+框架提供的菜单注册器，允许插件按需向主窗口的「设置」菜单注册设置项。
 
 设计要点：
-- 每个插件通过实现 ``register_menus(registry)`` 方法注册自身的菜单。
-- ``MenuRegistry`` 收集所有插件注册的菜单定义（结构化数据，不依赖 Qt 对象），
-  由 MainWindow 在构建菜单栏时统一转换为 QMenu/QAction，便于主题切换时重建。
-- 支持普通 action、可勾选 action（checkable）、子菜单（submenu，可包含互斥项组）、分隔符。
+- 每个插件通过实现 ``register_settings(registry)`` 方法声明自身设置项。
+- 插件调用 ``registry.add_settings_menu(plugin_name, title)`` 声明
+  「设置 → <工具名>」分组，之后的 ``add_action/add_submenu/add_separator``
+  都作用于该分组；框架统一挂载，插件不再占用菜单栏顶层。
+- ``MenuRegistry`` 收集的是结构化数据（不依赖 Qt 对象），由 MainWindow 在
+  构建菜单栏时统一转换为 QMenu/QAction，便于主题切换时重建。
+- 支持普通 action、可勾选 action（checkable）、子菜单（submenu，可包含互斥项组）、
+  分隔符。
 
 示例::
 
-    def register_menus(self, registry):
+    def register_settings(self, registry):
         widget = self.get_widget()
-        registry.add_menu(self.name, "终端(&T)") \
+        registry.add_settings_menu(self.name, self.display_name) \
             .add_action("刷新列表", widget.load_connections, shortcut="F5") \
             .add_separator() \
             .add_submenu("字体大小", items=[
@@ -25,39 +29,45 @@
 
 
 class MenuRegistry:
-    """菜单注册器：收集插件注册的菜单定义。
+    """设置注册器：收集插件注册的设置分组。
 
     注册结果为纯数据结构（list of dict），不持有任何 Qt 对象，
     以便在主题切换重建菜单栏时重新收集并构建。
     """
 
     def __init__(self):
-        # 已注册的顶级菜单列表，每项格式：
+        # 已注册的设置分组列表（「设置 → <工具名>」），每项格式：
         # {
         #     'plugin_name': str,         # 注册方插件名
-        #     'title': str,               # 菜单标题（如 "终端(&T)"）
-        #     'items': [item_dict, ...]   # 菜单项定义列表
+        #     'title': str,               # 分组标题（如 "终端"）
+        #     'items': [item_dict, ...]   # 设置项定义列表
         # }
-        self._menus = []
+        self._settings = []
         # 当前正在构建的菜单引用（用于链式 add_action/add_submenu/add_separator）
         self._current_menu = None
 
-    def add_menu(self, plugin_name, title):
-        """注册一个顶级菜单，并设为当前活动菜单（后续 add_* 将作用于该菜单）。
+    def add_settings_menu(self, plugin_name, title):
+        """声明「设置 → <title>」分组，并设为当前活动菜单。
+
+        同一插件重复调用时复用已有分组，方便插件分批注册设置项。
 
         Args:
-            plugin_name: 注册方插件名（用于日志/去重/排序）。
-            title: 菜单标题，建议包含助记符，如 "终端(&T)"。
+            plugin_name: 注册方插件名（用于分组去重）。
+            title: 设置子菜单标题，一般为插件的 display_name，如 "终端"。
 
         Returns:
             self（支持链式调用）。
         """
+        for menu_def in self._settings:
+            if menu_def['plugin_name'] == plugin_name:
+                self._current_menu = menu_def
+                return self
         menu_def = {
             'plugin_name': plugin_name,
             'title': title,
             'items': []
         }
-        self._menus.append(menu_def)
+        self._settings.append(menu_def)
         self._current_menu = menu_def
         return self
 
@@ -123,18 +133,20 @@ class MenuRegistry:
         self._current_menu['items'].append({'type': 'separator'})
         return self
 
-    def get_menus(self):
-        """获取所有已注册的顶级菜单定义。"""
-        return self._menus
+    def get_settings(self):
+        """获取所有已注册的设置分组定义（「设置 → <工具名>」）。"""
+        return self._settings
 
     def clear(self):
-        """清空所有注册的菜单。"""
-        self._menus.clear()
+        """清空所有已注册的设置分组。"""
+        self._settings.clear()
         self._current_menu = None
 
     def _ensure_current_menu(self):
         if self._current_menu is None:
-            raise RuntimeError("必须先调用 add_menu() 注册顶级菜单后再添加菜单项")
+            raise RuntimeError(
+                "必须先调用 add_settings_menu() 声明设置分组后再添加设置项"
+            )
 
 
 class _SubmenuBuilder:

@@ -16,10 +16,10 @@ from PyQt6.QtWidgets import (
     QFrame, QStackedWidget, QToolButton,
     QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QEvent, QPoint
 from PyQt6.QtGui import (
     QFont, QAction, QTextCursor, QColor, QKeyEvent, QTextCharFormat,
-    QCursor, QKeySequence, QShortcut
+    QCursor, QKeySequence, QShortcut, QPainter, QPolygon
 )
 from .connection_context import ConnectionContext
 from .ssh_connection import SSHConnection
@@ -40,7 +40,7 @@ _DOWN_ARROW_IMG = os.path.join(
 # 终端会话日志默认目录
 _TERMINAL_LOG_DIR = os.path.join(_PROJECT_ROOT, 'logs', 'terminal')
 
-# 保活发送间隔默认值（秒）：默认 5 分钟，可在「终端 → 保活时间」菜单中配置
+# 保活发送间隔默认值（秒）：默认 5 分钟，可在「设置 → 终端 → 保活时间」中配置
 _DEFAULT_KEEPALIVE_INTERVAL = 300
 # 保活间隔允许的配置范围（秒）
 _KEEPALIVE_MIN = 30
@@ -60,6 +60,10 @@ _CONNECTION_FIELDS = {
 
 # 保活能力：串口没有链路层心跳，SSH/Telnet 均可应用
 _KEEPALIVE_SUPPORT = {'ssh': True, 'telnet': True, 'serial': False}
+
+# 单字符终端单元格宽度缓存：大量输出时每个字符都要换算宽度，
+# unicodedata 的三次查表是渲染热点，按字符缓存后只需首次计算。
+_CHAR_WIDTH_CACHE = {}
 
 
 def _apply_keepalive_to(strategy, conn_type, interval):
@@ -113,6 +117,40 @@ def _reload_serial_ports(port_combo):
         _set_combo_text(port_combo, current)
     elif ports:
         port_combo.setCurrentText(ports[0])
+
+
+class _ThemedComboBox(QComboBox):
+    """快速连接栏下拉框：按主题文字色自绘三角箭头
+
+    Qt 的 QSS 不支持 CSS 边框三角（会渲染成方块），固定浅灰色图片箭头
+    在深/浅主题下又总有一侧对比度不足，因此统一用 QPainter 跟随主题绘制。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._arrow_color = QColor('#cccccc')
+
+    def set_arrow_color(self, color):
+        """设置箭头颜色（主题刷新时由调用方传入 text-secondary）"""
+        color = QColor(color)
+        if color.isValid() and color != self._arrow_color:
+            self._arrow_color = color
+            self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._arrow_color)
+        cx = self.width() - 11
+        cy = self.height() // 2
+        painter.drawPolygon(QPolygon([
+            QPoint(cx - 4, cy - 2),
+            QPoint(cx + 4, cy - 2),
+            QPoint(cx, cy + 3),
+        ]))
+        painter.end()
 
 
 def _make_form_label(text, style=""):
@@ -234,7 +272,7 @@ class TerminalPlugin:
     def deactivate(self):
         pass
 
-    # 终端工具支持的字体大小档位（与「终端 → 字体大小」菜单保持一致）
+    # 终端工具支持的字体大小档位（与「设置 → 终端 → 字体大小」保持一致）
     _FONT_SIZES = [
         ("8px", 8),
         ("10px", 10),
@@ -247,13 +285,20 @@ class TerminalPlugin:
     ]
 
     def register_menus(self, registry):
-        """向框架菜单栏注册终端工具的菜单项。
+        """定义终端工具的菜单内容。
 
-        注册一个「终端」顶级菜单，包含：
-          - 刷新列表（F5）
+        菜单内容包含：
           - 字体大小（子菜单，单选互斥）
-          - 颜色显示（可勾选开关）
+          - 保活时间（子菜单，单选互斥，支持自定义）
+          - 颜色显示 / 按钮工具栏（可勾选开关）
+          - 日志记录 / 侧边栏（可勾选开关）
 
+        本方法通过 ``registry.add_menu`` 构建菜单定义，由
+        ``terminal_plugin.TerminalPlugin.register_settings`` 代理注册到
+        平台级「设置 → 终端」下，不再占用菜单栏顶层。
+
+        连接列表刷新已改为左侧边栏按钮（F5 快捷键仍保留在 TerminalWidget 上），
+        不再作为菜单项，避免两处重复入口。
         菜单在每次重建（含主题切换）时由框架重新收集，
         因此 checked 状态会读取 widget 的最新值。
         """
@@ -262,12 +307,6 @@ class TerminalPlugin:
         color_enabled = getattr(widget, 'color_enabled', True)
 
         builder = registry.add_menu(self.name, "终端(&T)")
-        builder.add_action(
-            "刷新列表",
-            lambda checked: widget.load_connections(),
-            shortcut="F5",
-        )
-        builder.add_separator()
 
         # 字体大小子菜单：使用同组名实现单选互斥
         submenu = builder.add_submenu("字体大小")
@@ -1288,15 +1327,35 @@ class SessionTab(QWidget):
         中文等东亚宽字符占 2 格，组合符/零宽字符占 0 格，其余占 1 格。
         QTextDocument 的位置按字符计，终端 CUP/换行按单元格计，
         两者在含中文时必须换算，否则光标会落到错误字符位置。
+
+        大量输出时本函数会被调用上百万次，因此先走 ASCII 快路径，
+        其余字符按字符缓存宽度（unicodedata 查询只在首次进行）。
         """
+        if ' ' <= ch <= '~':
+            return 1
+        try:
+            return _CHAR_WIDTH_CACHE[ch]
+        except KeyError:
+            pass
         if unicodedata.combining(ch) or unicodedata.category(ch) in ('Mn', 'Me', 'Cf'):
-            return 0
-        return 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+            width = 0
+        elif unicodedata.east_asian_width(ch) in ('W', 'F'):
+            width = 2
+        else:
+            width = 1
+        _CHAR_WIDTH_CACHE[ch] = width
+        return width
 
     @classmethod
     def _text_width(cls, text):
-        """一段文本占用的终端单元格数"""
-        return sum(cls._char_width(c) for c in text)
+        """一段文本占用的终端单元格数
+
+        ASCII 字符在终端里均占 1 格，走 C 实现的 isascii/len 快速路径；
+        只有含中文等非 ASCII 字符时才逐字符换算。
+        """
+        if text.isascii():
+            return len(text)
+        return sum(map(cls._char_width, text))
 
     @classmethod
     def _col_to_offset(cls, line, col):
@@ -1377,6 +1436,52 @@ class SessionTab(QWidget):
                     self._terminal_write_char(cursor, ch)
             i = j
 
+    def _write_plain_lines(self, cursor, text):
+        """批量写入「可打印字符 + 换行」文本（cat 大文件的快速路径）
+
+        语义与逐字符路径完全一致：
+        - 写满终端列宽硬换行（宽字符按 2 格算）；
+        - 主屏换行优先消耗清屏预置的空白行，否则插入新块；
+        - 备用屏幕交给滚动区域处理。
+
+        光标位于文档最后一块行尾且所有行都不超过列宽时（流式输出的常态），
+        整批文本一次 insertText 写入，把每行 2 次插入降为整块 1 次，
+        大幅减少 QTextDocument 的布局/变更开销。
+        """
+        if not text:
+            return
+        cols = self._get_screen_cols()
+        lines = text.split('\n')
+        block = cursor.block()
+        at_line_end = cursor.position() >= block.position() + len(block.text())
+
+        if not self._alt_screen_active and at_line_end and not block.next().isValid():
+            fits = self._text_width(block.text()) + self._text_width(lines[0]) <= cols
+            if fits:
+                for line in lines[1:]:
+                    if self._text_width(line) > cols:
+                        fits = False
+                        break
+            if fits:
+                cursor.insertText(text)
+                return
+
+        # 慢路径：逐行写入（首行可能从行中开始，需要覆盖语义与硬换行）
+        last = len(lines) - 1
+        for idx, line in enumerate(lines):
+            if line:
+                self._write_printable_run(cursor, line)
+            if idx != last:
+                if self._alt_screen_active:
+                    self._alt_line_feed(cursor, reset_col=True)
+                elif cursor.block().next().isValid():
+                    # 消耗清屏预置的空白行（与逐字符路径一致）
+                    cursor.movePosition(QTextCursor.MoveOperation.Down)
+                    cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+                else:
+                    cursor.movePosition(QTextCursor.MoveOperation.EndOfLine)
+                    cursor.insertText('\n')
+
     def _insert_text_with_cr(self, cursor, text):
         """插入文本，按终端语义处理控制字符
 
@@ -1392,6 +1497,10 @@ class SessionTab(QWidget):
         if not any(c in text for c in control_chars):
             # 纯文本路径：行尾批量追加、行中逐字覆盖、写满右边距自动换行
             self._write_printable_run(cursor, text)
+            return
+        if not any(c in text for c in '\r\b\x7f\t\x1b' + self._IGNORE_CHARS):
+            # 仅含换行的纯文本（服务器回显/cat 输出的常态）：按行批量写入
+            self._write_plain_lines(cursor, text)
             return
 
         i = 0
@@ -2682,7 +2791,7 @@ class SessionTab(QWidget):
             if strategy and hasattr(strategy, 'send_raw') and hasattr(strategy, 'read_output'):
                 self.interactive_mode = True
                 # 默认开启连接保活，避免长时间空闲被 NAT/防火墙超时断开
-                # 保活间隔由「终端 → 保活时间」菜单配置（默认 5 分钟）
+                # 保活间隔由「设置 → 终端 → 保活时间」配置（默认 5 分钟）
                 keepalive_interval = self._get_keepalive_interval()
                 keepalive_state, keepalive_error = _apply_keepalive_to(
                     strategy, conn_type, keepalive_interval)
@@ -3513,7 +3622,8 @@ class TerminalWidget(QWidget):
         # 统一按钮样式：蓝色背景 + 白色字体 + 加粗
         unified_btn_css = self._get_button_css('button')
 
-        # 操作按钮行：新建连接、SFTP
+        # 操作按钮行：新建连接 + 刷新列表（同级并排）；SFTP 单独一行，
+        # 避免侧边栏收窄到最小宽度时三个按钮互相挤压裁字。
         # （重新连接/复制连接已移至会话标签页右键菜单及快捷键）
         row1 = QHBoxLayout()
         row1.setSpacing(4)
@@ -3521,14 +3631,25 @@ class TerminalWidget(QWidget):
         self.new_conn_btn.setFixedHeight(32)
         self.new_conn_btn.clicked.connect(self.show_new_connection_dialog)
         self.new_conn_btn.setStyleSheet(unified_btn_css)
-        row1.addWidget(self.new_conn_btn)
+        row1.addWidget(self.new_conn_btn, 3)
 
+        # 刷新连接列表：与「新建连接」同级并排，取代原菜单项（F5 仍可用）
+        self.refresh_conn_btn = QPushButton("刷新")
+        self.refresh_conn_btn.setFixedHeight(32)
+        self.refresh_conn_btn.setToolTip("刷新连接列表（F5）")
+        self.refresh_conn_btn.clicked.connect(self.load_connections)
+        self.refresh_conn_btn.setStyleSheet(unified_btn_css)
+        row1.addWidget(self.refresh_conn_btn, 2)
+        quick_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
         self.sftp_btn = QPushButton("SFTP")
         self.sftp_btn.setFixedHeight(32)
         self.sftp_btn.clicked.connect(self.show_sftp_dialog)
         self.sftp_btn.setStyleSheet(unified_btn_css)
-        row1.addWidget(self.sftp_btn)
-        quick_layout.addLayout(row1)
+        row2.addWidget(self.sftp_btn)
+        quick_layout.addLayout(row2)
 
         sidebar_layout.addWidget(self.quick_actions)
 
@@ -3831,6 +3952,11 @@ class TerminalWidget(QWidget):
                 background-color: {bg_bar};
                 border-bottom: 1px solid {self._get_style('border', '#3c3c3c')};
             }}
+            QLabel {{
+                color: {text_primary};
+                background: transparent;
+                font-size: {font_size_normal};
+            }}
             QLabel#quick_bar_title {{
                 color: {text_secondary};
                 background: transparent;
@@ -3846,12 +3972,33 @@ class TerminalWidget(QWidget):
                 font-size: {font_size_normal};
                 min-height: 22px;
             }}
-            QLineEdit:focus, QSpinBox:focus, QComboBox:hover {{
+            QLineEdit:focus, QSpinBox:focus, QComboBox:hover, QComboBox:focus,
+            QComboBox:on {{
                 border-color: {border_focus};
                 background-color: {bg_input_focus};
             }}
-            QComboBox::drop-down {{ border: none; width: 18px; }}
-            QComboBox::down-arrow {{ image: url({_DOWN_ARROW_IMG}); }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 18px;
+                background: transparent;
+            }}
+            /* 箭头由 _ThemedComboBox 自绘（跟随主题文字色），这里屏蔽原生箭头 */
+            QComboBox::down-arrow {{ image: none; }}
+            /* 可编辑下拉（串口号/波特率）的内部编辑区：交由 QComboBox 统一绘制，
+               否则内部 QLineEdit 会沿用系统默认底色与文字色，深色主题下露白 */
+            QComboBox QLineEdit {{
+                background: transparent;
+                color: {text_primary};
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                min-height: 0px;
+                font-size: {font_size_normal};
+            }}
+            QComboBox QLineEdit:focus {{
+                background: transparent;
+                border: none;
+            }}
             QComboBox QAbstractItemView {{
                 background-color: {bg_tertiary};
                 color: {text_primary};
@@ -3904,6 +4051,14 @@ class TerminalWidget(QWidget):
             }}
         """
 
+    def _sync_quick_bar_arrow_colors(self):
+        """把主题的 text-secondary 同步给快速连接栏的自绘箭头"""
+        color = self._get_style('text-secondary', '#cccccc')
+        for name in ('qc_type_combo', 'qc_serial_combo', 'qc_baud_combo'):
+            combo = getattr(self, name, None)
+            if isinstance(combo, _ThemedComboBox):
+                combo.set_arrow_color(color)
+
     def _init_quick_connect_bar(self, right_layout, btn_css=None):
         """构建顶部快速连接栏
 
@@ -3921,7 +4076,7 @@ class TerminalWidget(QWidget):
         title.setObjectName("quick_bar_title")
         bar.addWidget(title)
 
-        self.qc_type_combo = QComboBox()
+        self.qc_type_combo = _ThemedComboBox()
         self.qc_type_combo.addItems(["ssh", "telnet", "serial"])
         self.qc_type_combo.setFixedWidth(76)
         self.qc_type_combo.currentTextChanged.connect(self._on_quick_type_changed)
@@ -3934,8 +4089,10 @@ class TerminalWidget(QWidget):
         nl.setSpacing(6)
         self.qc_host_input = QLineEdit()
         self.qc_host_input.setPlaceholderText("主机地址")
-        self.qc_host_input.setFixedWidth(195)  # 地址框固定宽度（原弹性宽度收窄约50%）
-        nl.addWidget(self.qc_host_input)
+        # 主机框弹性填充：telnet 下密码/密钥框隐藏后，剩余宽度由主机框吸收，
+        # 不会被 QBoxLayout 均摊成字段之间的突兀留白
+        self.qc_host_input.setMinimumWidth(160)
+        nl.addWidget(self.qc_host_input, 1)
         self.qc_port_input = QSpinBox()
         self.qc_port_input.setRange(1, 65535)
         self.qc_port_input.setValue(22)
@@ -3945,12 +4102,12 @@ class TerminalWidget(QWidget):
         nl.addWidget(self.qc_port_input)
         self.qc_user_input = QLineEdit()
         self.qc_user_input.setPlaceholderText("用户名")
-        self.qc_user_input.setFixedWidth(96)
+        self.qc_user_input.setFixedWidth(110)
         nl.addWidget(self.qc_user_input)
         self.qc_password_input = QLineEdit()
         self.qc_password_input.setPlaceholderText("密码")
         self.qc_password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.qc_password_input.setFixedWidth(96)
+        self.qc_password_input.setFixedWidth(110)
         nl.addWidget(self.qc_password_input)
         # SSH 密钥文件选择（输入框 + 浏览按钮），与主机框平分弹性宽度
         self.qc_keyfile_widget = QWidget()
@@ -3975,9 +4132,9 @@ class TerminalWidget(QWidget):
         sl = QHBoxLayout(serial_page)
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(6)
-        self.qc_serial_combo = QComboBox()
+        self.qc_serial_combo = _ThemedComboBox()
         self.qc_serial_combo.setMinimumWidth(130)
-        self.qc_baud_combo = QComboBox()
+        self.qc_baud_combo = _ThemedComboBox()
         self.qc_baud_combo.setFixedWidth(96)
         # 与新建/编辑连接对话框共用同一套可编辑控件与候选值
         _configure_serial_combos(self.qc_serial_combo, self.qc_baud_combo)
@@ -3992,7 +4149,6 @@ class TerminalWidget(QWidget):
         sl.addWidget(self.qc_serial_refresh_btn)
         sl.addWidget(QLabel("波特率"))
         sl.addWidget(self.qc_baud_combo)
-        sl.addStretch()
 
         self.qc_stack = QStackedWidget()
         self.qc_stack.addWidget(net_page)
@@ -4017,6 +4173,7 @@ class TerminalWidget(QWidget):
 
         self.quick_bar.setFixedHeight(38)  # 固定高度，避免垂直方向抢占会话区空间
         self.quick_bar.setStyleSheet(self._quick_bar_qss())
+        self._sync_quick_bar_arrow_colors()
         # 快速栏位于标签页上方
         right_layout.insertWidget(0, self.quick_bar)
 
@@ -4215,6 +4372,13 @@ class TerminalWidget(QWidget):
         QShortcut(QKeySequence("Ctrl+Shift+W"), self,
                   context=Qt.ShortcutContext.WindowShortcut,
                   activated=self._action_tab_close)
+
+        # 刷新连接列表：原「设置 → 终端 → 刷新列表」菜单项已改为左侧边栏按钮，
+        # F5 快捷键在此保留，焦点在终端输入区内同样可用。
+        self.refresh_connections_shortcut = QShortcut(
+            QKeySequence("F5"), self,
+            context=Qt.ShortcutContext.WindowShortcut,
+            activated=self.load_connections)
 
         # 连接切换快捷键（参考 Tabby）：
         # Ctrl+Tab 下一个连接、Ctrl+Shift+Tab 上一个连接由
@@ -4705,6 +4869,7 @@ class TerminalWidget(QWidget):
         # 刷新快速连接栏样式
         if hasattr(self, 'quick_bar'):
             self.quick_bar.setStyleSheet(self._quick_bar_qss())
+            self._sync_quick_bar_arrow_colors()
 
         # 刷新右侧面板背景
         if hasattr(self, 'right_panel'):
@@ -4748,6 +4913,7 @@ class TerminalWidget(QWidget):
         if hasattr(self, 'new_conn_btn'):
             btn_css = self._get_button_css('button')
             self.new_conn_btn.setStyleSheet(btn_css)
+            self.refresh_conn_btn.setStyleSheet(btn_css)
             self.sftp_btn.setStyleSheet(btn_css)
 
         # 刷新连接列表样式

@@ -103,7 +103,7 @@ MyDesk/
 ├── core/                    # 框架核心
 │   ├── main_window.py       # 主窗口、插件容器、主题切换、菜单构建
 │   ├── plugin_manager.py    # 插件动态加载与生命周期管理
-│   └── menu_registry.py     # 结构化菜单注册器（支持子菜单/互斥组/快捷键）
+│   └── menu_registry.py     # 结构化设置注册器（支持子菜单/互斥组/快捷键）
 ├── plugins/                 # 工具插件（每个目录一个独立插件）
 │   ├── terminal/            # 终端：SSH/Telnet/串口、ANSI 渲染、SFTP
 │   ├── protocol_tool/       # 协议测试：串口/TCP、Modbus RTU/TCP、从站模拟
@@ -157,11 +157,11 @@ pyserial>=3.5     # 串口通信
 python main.py
 ```
 
-启动后在顶部切换「终端、编译工具、脚本管理、计算工具、远程命令、协议测试」等页签即可使用；调测工具默认不占页签，可通过菜单「调测 → 显示调测工具」打开。
+启动后直接点击菜单栏右侧的「终端、编译工具、脚本管理、计算工具、协议测试」即可切换工具；调测工具默认不占工具位，可通过菜单「设置 → 调测工具 → 显示调测工具」打开。
 
 ### 4. 添加连接
 
-1. 打开「终端」页签；
+1. 点击菜单栏右侧的「终端」，或使用启动时默认打开的终端视图；
 2. 在顶部快速连接栏选择 `ssh / telnet / serial`，填写地址、端口、账号等；
 3. 点击「连接」立即会话，或点击「保存」沉淀到左侧连接列表，以后双击即可连接。
 
@@ -169,7 +169,7 @@ python main.py
 
 ## 主题与配置
 
-- **切换主题**：主菜单「文件 → 设置 → 主题」选择深色 / 浅色，即时生效并持久化；
+- **切换主题**：主菜单「设置 → 主题」选择深色 / 浅色，即时生效并持久化；
 - **主题配色**：编辑 `config/theme/dark.json`、`config/theme/light.json` 可自定义颜色；
 - **插件配置**：各工具配置独立保存在 `config/<plugin>_config.json`，连接数据在 `config/connections.json`；
 - **日志位置**：应用日志 `logs/mydesk_debug_YYYYMMDD.log`，终端会话日志 `logs/terminal/`。
@@ -179,7 +179,7 @@ python main.py
 ## 插件化架构说明
 
 - 插件在 `config/plugin.json` 中注册，声明 `name / module / main_class`，由 `PluginManager` 动态导入实例化；
-- 插件只需提供 `get_widget()` 返回界面，并可通过 `register_menus(registry)` 声明自己的菜单（普通项、勾选项、子菜单、互斥单选组、快捷键均支持）；
+- 插件只需提供 `get_widget()` 返回界面，并可通过 `register_settings(registry)` 声明自己的设置项，框架统一挂到「设置 → <工具名>」（普通项、勾选项、子菜单、互斥单选组、快捷键均支持）；
 - 插件之间通过 `plugin_manager.get_plugin(name)` 协作，例如编译工具与脚本管理复用远程命令插件；
 - 新增工具时：在 `plugins/` 下新建目录 → 实现插件类 → 在 `plugin.json` 注册，无需改动框架代码。
 

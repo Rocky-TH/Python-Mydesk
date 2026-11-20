@@ -11,6 +11,8 @@ class PluginManager:
         self.plugins = {}
         self.plugin_configs = {}
         self._config_manager = config_manager
+        # 主窗口引用：由 MainWindow 注入，供插件按需调用框架能力（如显示/隐藏视图）
+        self.main_window = None
         # 统一状态接口：插件通过此回调向框架汇报自身状态
         self._status_callback = None
         # 保存每个插件最新上报的状态文本
@@ -105,29 +107,30 @@ class PluginManager:
         if self._status_callback:
             self._status_callback(plugin_name, '')
 
-    # ========== 菜单注册接口 ==========
-    def collect_plugin_menus(self):
-        """收集所有插件注册的菜单定义。
+    # ========== 设置注册接口 ==========
+    def collect_plugin_settings(self):
+        """收集所有插件注册的设置分组。
 
-        遍历所有已加载插件，调用其 ``register_menus(registry)`` 方法（若存在），
-        插件通过 registry 注册自身的菜单项。最终返回一个包含所有菜单定义的列表。
+        遍历所有已加载插件，调用其 ``register_settings(registry)`` 方法（若存在），
+        插件通过 ``registry.add_settings_menu(...)`` 声明「设置 → <工具名>」分组
+        并追加设置项，框架统一挂载到平台级「设置」菜单下。
 
         Returns:
-            list[dict]: 菜单定义列表，每项为
+            list[dict]: 设置分组列表，每项为
             ``{'plugin_name': str, 'title': str, 'items': [...]}``。
             按插件加载顺序排列。
         """
         registry = MenuRegistry()
         for plugin_name in self.plugins:
             plugin = self.plugins[plugin_name]
-            register_fn = getattr(plugin, 'register_menus', None)
+            register_fn = getattr(plugin, 'register_settings', None)
             if register_fn is None:
                 continue
             try:
                 register_fn(registry)
             except Exception as e:
                 self._logger.error(
-                    f"收集插件菜单失败: {plugin_name}: {e}",
+                    f"收集插件设置失败: {plugin_name}: {e}",
                     exc_info=True
                 )
-        return registry.get_menus()
+        return registry.get_settings()
