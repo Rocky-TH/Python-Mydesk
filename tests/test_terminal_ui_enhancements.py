@@ -173,6 +173,57 @@ check('5.10 右键菜单动作不带快捷键提示',
       widget.act_tab_close.shortcut().toString() == ''
       and widget.act_tab_duplicate.shortcut().toString() == '')
 
+# ===== 6. 连接字段可见性：密码字段仅 SSH 显示 =====
+print('\n========== 6. 连接字段可见性 ==========')
+telnet_fields = tw._connection_fields('telnet')
+ssh_fields = tw._connection_fields('ssh')
+check('6.1 Telnet 字段不含密码',
+      'password' not in telnet_fields
+      and {'host', 'port', 'username'} <= telnet_fields,
+      f'telnet={sorted(telnet_fields)}')
+check('6.2 SSH 仍显示密码与密钥文件',
+      {'password', 'key_file'} <= ssh_fields,
+      f'ssh={sorted(ssh_fields)}')
+
+widget._on_quick_type_changed('telnet')
+check('6.3 快速连接栏切到 Telnet 后隐藏密码框',
+      widget.qc_password_input.isHidden())
+widget.qc_password_input.setText('stale-secret')
+widget._on_quick_type_changed('telnet')
+check('6.4 隐藏的密码框不保留旧输入（不写入 Telnet 配置）',
+      widget.qc_password_input.text() == '',
+      repr(widget.qc_password_input.text()))
+widget._on_quick_type_changed('ssh')
+check('6.5 快速连接栏切回 SSH 后重新显示密码框',
+      not widget.qc_password_input.isHidden())
+
+telnet_dialog = tw.ConnectionDialog(connection={
+    'name': 'telnet-demo', 'type': 'telnet',
+    'config': {'host': 'h', 'port': 23, 'username': 'u'},
+})
+telnet_dialog.show()
+app.processEvents()
+check('6.6 Telnet 对话框不显示密码字段',
+      telnet_dialog.password_input not in
+      telnet_dialog.config_widget.findChildren(tw.QLineEdit)
+      and not telnet_dialog.password_input.isVisible())
+telnet_dialog.close()
+telnet_dialog.deleteLater()
+
+ssh_dialog = tw.ConnectionDialog(connection={
+    'name': 'ssh-demo', 'type': 'ssh',
+    'config': {'host': 'h', 'port': 22, 'username': 'u', 'password': 'p'},
+})
+ssh_dialog.show()
+app.processEvents()
+check('6.7 SSH 对话框显示密码字段',
+      ssh_dialog.password_input in
+      ssh_dialog.config_widget.findChildren(tw.QLineEdit)
+      and ssh_dialog.password_input.isVisible())
+ssh_dialog.close()
+ssh_dialog.deleteLater()
+app.processEvents()
+
 widget.deleteLater()
 
 # ===== 汇总 =====

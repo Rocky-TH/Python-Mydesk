@@ -50,10 +50,10 @@ _SERIAL_PORT_FALLBACK = [f'COM{i}' for i in range(1, 21)]
 _SERIAL_BAUD_CANDIDATES = ["9600", "19200", "38400", "57600", "115200"]
 
 # 各连接类型使用的字段集：快速连接栏与新建/编辑对话框共用一张表，
-# 避免出现“快速栏能填 telnet 密码、对话框却看不到”的不一致。
+# 避免两个入口的字段可见性不一致。密码仅 SSH 需要（Telnet 登录在终端内交互输入）。
 _CONNECTION_FIELDS = {
     'ssh': {'host', 'port', 'username', 'password', 'key_file'},
-    'telnet': {'host', 'port', 'username', 'password'},
+    'telnet': {'host', 'port', 'username'},
     'serial': {'serial'},
 }
 
@@ -4037,6 +4037,9 @@ class TerminalWidget(QWidget):
             self.qc_user_input.setVisible('username' in fields)
         if hasattr(self, 'qc_password_input'):
             self.qc_password_input.setVisible('password' in fields)
+            if 'password' not in fields:
+                # 隐藏的密码框不参与保存，避免把上一次输入静默写进 Telnet 配置
+                self.qc_password_input.clear()
         if hasattr(self, 'qc_keyfile_widget'):
             self.qc_keyfile_widget.setVisible('key_file' in fields)
 
@@ -5373,8 +5376,10 @@ class ConnectionDialog(QDialog):
             if 'username' in fields:
                 self.config_layout.addWidget(self._make_row("用户名:", self.username_input))
             if 'password' in fields:
-                # Telnet 连接时也会发送密码，对话框必须能看到并修改
                 self.config_layout.addWidget(self._make_row("密码:", self.password_input))
+            else:
+                # 隐藏的密码框不参与保存，避免把上一次输入静默写进 Telnet 配置
+                self.password_input.clear()
             if 'key_file' in fields:
                 self.config_layout.addWidget(self._make_key_file_row())
 
