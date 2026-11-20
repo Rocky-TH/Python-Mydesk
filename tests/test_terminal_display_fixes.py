@@ -423,6 +423,84 @@ finally:
     app.processEvents()
 
 
+# ===== 7. 高 DPI（小数行距）下 nano 底部两行仍完整可见 =====
+print('\n========== 7. 高 DPI 行高取整 ==========')
+import PyQt6.QtGui as QtGui
+from PyQt6.QtGui import QFont
+
+_RealFontMetrics = QFontMetricsF
+
+
+class FractionalMetrics:
+    """模拟 Windows 175% 缩放：lineSpacing 带小数，文档块高为其向上取整
+
+    Consolas 11 在 175% 缩放下 lineSpacing=17.55，但 QTextDocument 每个
+    文本块实际占用 18px。旧实现直接用小数行距计算行数，会多算 1~2 行，
+    nano 底部状态栏/帮助行因此被挤出可视区。
+    """
+
+    def __init__(self, font):
+        self._real = _RealFontMetrics(font)
+
+    def horizontalAdvance(self, text):
+        return self._real.horizontalAdvance(text)
+
+    def lineSpacing(self):
+        return self._real.lineSpacing() - 0.9
+
+
+def layout_tab(tag, width, height, font_size):
+    """按真实布局创建会话页（不手工改子控件几何）"""
+    tab = tw.SessionTab(session_id=tag, session_name=tag, config_manager=_config_manager)
+    tab.resize(width, height)
+    tab.show()
+    app.processEvents()
+    tab.terminal_display.setFont(QFont('Consolas', font_size))
+    app.processEvents()
+    return tab
+
+
+from unittest import mock as _mock
+
+for idx, (height, font_size) in enumerate(
+        ((520, 9), (420, 11), (320, 11), (420, 14), (260, 11)), start=1):
+    tab = layout_tab(f'hidpi-{height}-{font_size}', 420, height, font_size)
+    try:
+        tab._last_pty_size = None
+        with _mock.patch.object(QtGui, 'QFontMetricsF', FractionalMetrics):
+            cols, rows = tab._measure_screen_size()
+        tab._last_pty_size = (cols, rows)
+
+        tab.write_output('\x1b[?1049h')
+        for r in range(1, rows + 1):
+            if r == rows - 1:
+                text = 'nano-status'
+            elif r == rows:
+                text = 'nano-help'
+            else:
+                text = 'n' * cols
+            tab.write_output(f'\x1b[{r};1H{text}')
+        app.processEvents()
+
+        disp = tab.terminal_display
+        doc = disp.document()
+        layout = doc.documentLayout()
+        last_two = [doc.findBlockByNumber(i)
+                    for i in (doc.blockCount() - 2, doc.blockCount() - 1)]
+        bottoms = [layout.blockBoundingRect(b).bottom() for b in last_two]
+        texts = [b.text().strip() for b in last_two]
+        vsb = disp.verticalScrollBar()
+        check(f'7.{idx} 【{height}px/{font_size}px】nano 底部两行完整可见且无垂直滚动条',
+              doc.blockCount() == rows
+              and texts == ['nano-status', 'nano-help']
+              and all(b <= disp.viewport().height() for b in bottoms)
+              and vsb.maximum() == 0,
+              f'rows={rows} blocks={doc.blockCount()} texts={texts} '
+              f'bottoms={bottoms} vp={disp.viewport().height()} vmax={vsb.maximum()}')
+    finally:
+        close_tab(tab)
+
+
 print('\n========== 汇总 ==========')
 
 failed = [r for r in results if r[1] == 'FAIL']

@@ -1,4 +1,5 @@
 import os
+import math
 import posixpath
 import re
 import time
@@ -779,11 +780,15 @@ class SessionTab(QWidget):
         from PyQt6.QtGui import QFontMetricsF
         disp = self.terminal_display
         try:
-            # 用浮点度量：高 DPI 缩放下单字符步进/行高常带小数，
-            # QFontMetrics 取整会向下抹掉小数，导致行列数偏大（底部行、最右列被裁）
+            # 用浮点度量：高 DPI 缩放下单字符步进常带小数，
+            # QFontMetrics 取整会向下抹掉小数，导致列数偏大（最右列被裁）
             fm = QFontMetricsF(disp.font())
             char_width = fm.horizontalAdvance('M')
-            line_height = fm.lineSpacing()
+            # 行高必须按 QTextDocument 的整数块高计算：Windows 175% 缩放下
+            # Consolas 11 的 lineSpacing 是 17.55，文档实际每块占 18px。
+            # 直接用小数行距会高估可容纳行数，nano 底部状态栏/帮助行被挤出
+            # 可视区（需要向下滚动才能看到最后两行）。
+            line_height = math.ceil(fm.lineSpacing())
         except (RuntimeError, ValueError) as exc:
             Logger.get_instance().debug(f"测量终端尺寸失败: {exc}")
             return None
