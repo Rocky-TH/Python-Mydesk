@@ -345,6 +345,13 @@ class TerminalEdit(QTextEdit):
         self._color_scheme = color_scheme or {}
         self._config_manager = config_manager
         self._mouse_down = False  # 鼠标按下标记（拖选进行中，渲染层据此保护选区）
+        self._double_click = False  # 双击期间不恢复文档光标（保持选区与视图）
+        # 终端按列宽自行插入硬换行（DECAWM），必须关闭 QTextEdit 的
+        # WidgetWidth 软换行：否则同一行会被像素宽度再折一次（一行显示成两行），
+        # 且全屏程序（nano/vi）按行号定位的 CUP 会与视觉行错位，导致显示/输入错乱。
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        # 终端语义：超出右边界的内容不横向滚动，避免横向滚动条挤占列宽
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.set_style()
 
@@ -459,8 +466,14 @@ class TerminalEdit(QTextEdit):
     def mousePressEvent(self, event):
         """记录点击前的光标位置（供 mouseRelease 恢复），并标记拖选进行中"""
         self._cursor_pos_before_mouse = self.textCursor().position()
+        self._scroll_value_before_mouse = self.verticalScrollBar().value()
         self._mouse_down = True
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """双击选词：标记后不再恢复文档光标，避免视图跳回终端光标（文档末尾）"""
+        self._double_click = True
+        super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event):
         """鼠标释放后：纯点击（非拖选）恢复光标位置
@@ -469,15 +482,23 @@ class TerminalEdit(QTextEdit):
         鼠标点击不应改变它，否则会导致后续行内编辑回显插入错位。
         拖选/双击选词（复制场景）保留选区，渲染层在选中保护模式下
         不会触碰显示光标（见 SessionTab._render_text）。
+        恢复文档光标时同步还原滚动位置：setTextCursor 会让视图滚动到
+        光标处（通常在最底部），用户向上翻页后点击/双击会被拽回底部。
         """
         super().mouseReleaseEvent(event)
         self._mouse_down = False
-        if not self.textCursor().hasSelection():
-            pos = getattr(self, '_cursor_pos_before_mouse', None)
-            if pos is not None:
-                cur = self.textCursor()
-                cur.setPosition(min(pos, self.document().characterCount() - 1))
-                self.setTextCursor(cur)
+        double_click = self._double_click
+        self._double_click = False
+        if double_click or self.textCursor().hasSelection():
+            return
+        pos = getattr(self, '_cursor_pos_before_mouse', None)
+        if pos is None:
+            return
+        scroll_value = self.verticalScrollBar().value()
+        cur = self.textCursor()
+        cur.setPosition(min(pos, self.document().characterCount() - 1))
+        self.setTextCursor(cur)
+        self.verticalScrollBar().setValue(scroll_value)
 
     def keyPressEvent(self, event):
         """拦截所有键盘事件并发送给父组件处理"""
@@ -1211,10 +1232,24 @@ class SessionTab(QWidget):
             cursor.insertText(ch)
 
     def _get_screen_cols(self):
-        """当前终端屏幕列数（取最近一次 PTY 尺寸测量结果）"""
+        """当前终端屏幕列数（取最近一次 PTY 尺寸测量结果）
+
+        没有 PTY 尺寸时（串口、连接建立前）按控件实际宽度与字体度量估算，
+        避免固定 80 列导致宽窗口下的长行被错误折行。
+        """
         prev = getattr(self, '_last_pty_size', None)
         if prev and len(prev) == 2:
             return max(20, int(prev[0]))
+        from PyQt6.QtGui import QFontMetrics
+        try:
+            fm = QFontMetrics(self.terminal_display.font())
+            char_width = fm.horizontalAdvance('M')
+            margins = self.terminal_display.contentsMargins()
+            avail = self.terminal_display.width() - margins.left() - margins.right()
+            if char_width > 0 and avail > 0:
+                return max(20, avail // char_width)
+        except (RuntimeError, ValueError) as exc:
+            Logger.get_instance().debug(f"估算终端列数失败: {exc}")
         return 80
 
     @staticmethod
@@ -2856,7 +2891,7 @@ class TerminalButtonToolbar(QWidget):
             btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             btn.clicked.connect(lambda checked, bid=btn_id: self.button_triggered.emit(bid))
             btn.customContextMenuRequested.connect(
-                lambda pos, bid=btn_id, b=btn: self._show_button_context_menu(bid, b.mapToParent(pos)))
+                lambda pos, bid=btn_id, b=btn: self._show_button_context_menu(bid, b.mapToGlobal(pos)))
             # Tooltip
             if btn_data['type'] == 'command':
                 btn.setToolTip(f"命令: {btn_data.get('command', '')}")
