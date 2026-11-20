@@ -239,7 +239,192 @@ finally:
     app.processEvents()
 
 
+# ===== 5. 终端逻辑行列必须与可视区一致（cat 不裁列 / nano 底部不缺行） =====
+print('\n========== 5. 行列与可视区一致 ==========')
+from PyQt6.QtGui import QFontMetricsF
+
+
+class StubPtyStrategy:
+    """记录 resize_pty 调用的最小策略桩"""
+
+    def __init__(self):
+        self.sizes = []
+
+    def resize_pty(self, width, height):
+        self.sizes.append((width, height))
+
+    def is_connected(self):
+        return True
+
+    def read_output(self, timeout=0.05):
+        return ''
+
+    def send_raw(self, data):
+        pass
+
+
+def visible_cols(tab):
+    """控件在垂直滚动条出现后真正能显示的列数"""
+    disp = tab.terminal_display
+    fm = QFontMetricsF(disp.font())
+    doc_margin = disp.document().documentMargin()
+    return int((disp.viewport().width() - 2 * doc_margin) // fm.horizontalAdvance('M'))
+
+
+tab = new_tab('fit')
+try:
+    tab.terminal_display.clear()
+    tab._output_history.clear()
+    tab._last_pty_size = None
+    measured = tab._measure_screen_size()
+    check('5.1 无 PTY 尺寸时按可视区测量行列（不再固定 80x24）',
+          measured is not None
+          and tab._get_screen_cols() == measured[0]
+          and tab._get_screen_rows() == measured[1],
+          f'measured={measured} cols={tab._get_screen_cols()} rows={tab._get_screen_rows()}')
+
+    cols, rows = measured
+    tab._last_pty_size = (cols, rows)
+    # cat 一屏多的文本，每行正好写满终端列宽
+    tab.write_output(('X' * cols + '\r\n') * (rows * 3))
+    app.processEvents()
+    disp = tab.terminal_display
+    block = disp.document().firstBlock()
+    need_px = (block.layout().boundingRect().width()
+               + 2 * disp.document().documentMargin())
+    check('5.2 cat 每行像素宽度不超过可视宽度（最右列不被裁）',
+          need_px <= disp.viewport().width(),
+          f'need={need_px:.1f} viewport={disp.viewport().width()}')
+    check('5.3 cat 长文本不产生横向溢出',
+          disp.horizontalScrollBar().maximum() == 0,
+          f'hmax={disp.horizontalScrollBar().maximum()}')
+    check('5.4 垂直滚动条出现后可视列数仍等于终端列数',
+          disp.verticalScrollBar().isVisible() and visible_cols(tab) == cols,
+          f'visible={visible_cols(tab)} cols={cols} '
+          f'vscroll={disp.verticalScrollBar().isVisible()}')
+finally:
+    close_tab(tab)
+
+# nano：备用屏幕行数必须全部落在可视区内（无 PTY 尺寸时按可视区测量行数）
+tab = new_tab('nano-bottom', width=420, height=320)
+try:
+    tab.terminal_display.clear()
+    tab._output_history.clear()
+    tab._last_pty_size = None
+    expected_rows = tab._measure_screen_size()[1]
+    rows = tab._get_screen_rows()
+    cols = tab._get_screen_cols()
+    tab.write_output('\x1b[?1049h')
+    app.processEvents()
+    for i in range(rows):
+        tab.write_output(f'\x1b[{i + 1};1H' + f'row{i:02d}'.ljust(cols))
+    app.processEvents()
+    disp = tab.terminal_display
+    doc = disp.document()
+    check('5.5 备用屏幕块数等于可视区可容纳行数', doc.blockCount() == expected_rows,
+          f'blocks={doc.blockCount()} expected={expected_rows}')
+    check('5.6 备用屏幕整屏高度不超过可视区高度（底部行完整可见）',
+          doc.size().height() <= disp.viewport().height(),
+          f'doc={doc.size().height()} vp={disp.viewport().height()}')
+    check('5.7 备用屏幕不产生垂直滚动条（行数未被挤出可视区）',
+          not disp.verticalScrollBar().isVisible()
+          or disp.verticalScrollBar().maximum() == 0,
+          f'visible={disp.verticalScrollBar().isVisible()} '
+          f'max={disp.verticalScrollBar().maximum()}')
+finally:
+    close_tab(tab)
+
+
+# ===== 6. 光标一次一格 / 多字节字符解码 =====
+print('\n========== 6. 光标移动与 UTF-8 解码 ==========')
+tab = new_tab('cursor')
+try:
+    tab._last_pty_size = (40, 12)
+    tab.write_output('\x1b[?1049h\x1b[2;1Hhello nano')
+    app.processEvents()
+    bad = []
+    for col in range(1, 11):
+        tab.write_output(f'\x1b[2;{col}H')
+        app.processEvents()
+        idx = tab.terminal_display.textCursor().positionInBlock()
+        if idx != col - 1:
+            bad.append((col, idx))
+    check('6.1 每次 CUP 只前进一个单元格（ASCII）', not bad, repr(bad))
+
+    tab.write_output('\x1b[3;1H中文测试')
+    app.processEvents()
+    bad = []
+    for col, expect_idx in ((1, 0), (3, 1), (5, 2), (7, 3)):
+        tab.write_output(f'\x1b[3;{col}H')
+        app.processEvents()
+        idx = tab.terminal_display.textCursor().positionInBlock()
+        if idx != expect_idx:
+            bad.append((col, idx, expect_idx))
+    check('6.2 中文按字符前进一格（列 1/3/5/7 → 下标 0/1/2/3）', not bad, repr(bad))
+
+    tab.write_output('\x1b[5;1Habc\x1b[5;200H')
+    app.processEvents()
+    row5 = tab.terminal_display.document().findBlockByNumber(4).text().rstrip()
+    check('6.3 超出行宽的 CUP 列号被钳制，不会把整行撑宽',
+          tab._text_width(row5) <= tab._get_screen_cols(), repr(row5[:50]))
+finally:
+    close_tab(tab)
+
+# 多字节字符被读取边界切开时不能变成两个替代字符
+from plugins.terminal.ssh_connection import SSHConnection
+from plugins.terminal.telnet_connection import TelnetConnection
+
+ssh = SSHConnection()
+raw = '中文'.encode('utf-8')
+first = ssh._decode(raw[:4])   # 第一个字完整、第二个字只到第 1 字节
+second = ssh._decode(raw[4:])
+check('6.4 SSH 增量解码：被切开的 UTF-8 字符不产生替代字符',
+      first + second == '中文' and '\ufffd' not in first + second,
+      repr(first + second))
+
+tel = TelnetConnection()
+first = tel._decode(raw[:1])
+second = tel._decode(raw[1:])
+check('6.5 Telnet 增量解码：跨读取边界的多字节字符完整还原',
+      first + second == '中文' and '\ufffd' not in first + second,
+      repr(first + second))
+
+# 字号变化后 PTY 行列数必须同步重算（否则底部行/最右列被裁）
+plugin = tw.TerminalPlugin({'name': 'Terminal', 'display_name': '终端'})
+w = plugin.get_widget()
+w.resize(900, 600)
+w.show()
+app.processEvents()
+font_tab = tw.SessionTab(session_id='font', session_name='font',
+                         config_manager=_config_manager)
+font_tab.resize(900, 560)
+font_tab.show()
+app.processEvents()
+font_tab.connection_context.set_strategy(StubPtyStrategy())
+font_tab.interactive_mode = True
+font_tab._last_pty_size = None
+font_tab._update_terminal_size()
+old_size = font_tab._last_pty_size
+w.sessions[99] = {'tab': font_tab, 'connection': {}, 'id': 99}
+try:
+    from unittest import mock as _mock
+    with _mock.patch.object(w, '_save_terminal_settings', lambda: None):
+        w.set_font_size(16)
+    app.processEvents()
+    new_size = font_tab._last_pty_size
+    check('6.6 字号变化后 PTY 行列数同步重算',
+          old_size != new_size
+          and new_size == font_tab._measure_screen_size(),
+          f'old={old_size} new={new_size} measured={font_tab._measure_screen_size()}')
+finally:
+    w.sessions.pop(99, None)
+    font_tab.deleteLater()
+    w.deleteLater()
+    app.processEvents()
+
+
 print('\n========== 汇总 ==========')
+
 failed = [r for r in results if r[1] == 'FAIL']
 print(f'总计 {len(results)} 项，通过 {len(results) - len(failed)} 项，失败 {len(failed)} 项')
 for name, status, detail in failed:

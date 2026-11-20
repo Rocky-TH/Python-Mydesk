@@ -1,3 +1,4 @@
+import codecs
 import select
 import socket
 import threading
@@ -205,12 +206,22 @@ class TelnetConnection(ConnectionBase):
         self.port = 23
         self.tn = None
         self._lock = threading.Lock()
+        # 增量 UTF-8 解码器：多字节字符可能被两次读取切开
+        self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+
+    def _decode(self, data):
+        """按字节流增量解码 UTF-8（跨读取边界的多字节字符不会被拆成乱码）"""
+        if not data:
+            return ''
+        return self._decoder.decode(data)
 
     def connect(self, config):
         self.host = config.get('host', '')
         self.port = config.get('port', 23)
         self.username = config.get('username', '')
         self.password = config.get('password', '')
+        # 新连接重新开始字节流，丢弃上一连接残留的不完整字节
+        self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
         result = [False]
         error_msg = [None]
@@ -262,7 +273,7 @@ class TelnetConnection(ConnectionBase):
         try:
             self.tn.write(command.encode('utf-8') + b"\n")
             time.sleep(timeout)
-            response = self.tn.read_very_eager().decode('utf-8', errors='replace')
+            response = self._decode(self.tn.read_very_eager())
             return response
         except Exception as e:
             return f"[错误: {str(e)}]\n"
@@ -284,7 +295,7 @@ class TelnetConnection(ConnectionBase):
             return ""
 
         try:
-            return self.tn.read_very_eager().decode('utf-8', errors='replace')
+            return self._decode(self.tn.read_very_eager())
         except Exception as exc:
             Logger.get_instance().debug(f"Telnet 读取输出失败: {exc}")
             return ""
@@ -362,7 +373,7 @@ class TelnetConnection(ConnectionBase):
                 # 尝试读取
                 data = self.tn.read_very_eager()
                 if data:
-                    decoded = data.decode('utf-8', errors='replace')
+                    decoded = self._decode(data)
                     buffer += decoded
                     
                     # 检查是否匹配模式

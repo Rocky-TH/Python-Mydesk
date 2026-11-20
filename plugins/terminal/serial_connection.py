@@ -1,4 +1,5 @@
 import threading
+import codecs
 import time
 
 try:
@@ -25,6 +26,8 @@ class SerialConnection(ConnectionBase):
         self.read_thread = None
         self._running = False
         self._lock = threading.Lock()
+        # 增量 UTF-8 解码器：多字节字符可能被两次 read 切开
+        self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
     def connect(self, config):
         if not HAS_SERIAL:
@@ -35,6 +38,8 @@ class SerialConnection(ConnectionBase):
         self.bytesize = config.get('bytesize', 8)
         self.parity = config.get('parity', 'N')
         self.stopbits = config.get('stopbits', 1)
+        # 新连接重新开始字节流，丢弃上一连接残留的不完整字节
+        self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         
         result = [False]
         error_msg = [None]
@@ -79,7 +84,7 @@ class SerialConnection(ConnectionBase):
             try:
                 if self.serial_conn.in_waiting > 0:
                     data = self.serial_conn.read(self.serial_conn.in_waiting)
-                    decoded = data.decode('utf-8', errors='replace')
+                    decoded = self._decoder.decode(data)
                     with self._lock:
                         self._buffer += decoded
                 time.sleep(0.01)  # 减少CPU占用

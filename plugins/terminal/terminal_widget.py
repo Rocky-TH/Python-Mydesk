@@ -350,8 +350,10 @@ class TerminalEdit(QTextEdit):
         # WidgetWidth 软换行：否则同一行会被像素宽度再折一次（一行显示成两行），
         # 且全屏程序（nano/vi）按行号定位的 CUP 会与视觉行错位，导致显示/输入错乱。
         self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        # 终端语义：超出右边界的内容不横向滚动，避免横向滚动条挤占列宽
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 终端按列宽硬换行，正常情况下不会出现横向溢出；仍保留「按需」横向
+        # 滚动条作为兜底：PTY 尺寸变更前写出的超宽旧行不应被直接裁掉，
+        # 用户仍可横向滚动查看。
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.set_style()
 
@@ -760,6 +762,48 @@ class SessionTab(QWidget):
         super().resizeEvent(event)
         self._update_terminal_size()
 
+    def _measure_screen_size(self):
+        """按终端控件真实可视区计算 (列数, 行数)
+
+        终端逻辑尺寸必须与可视区严格一致，否则终端会按偏大的行列绘制：
+        最右列被控件边缘裁掉（cat 每行右侧缺列），底部若干行落到可视区之外
+        （nano 底部状态栏/帮助行看不到），全屏程序的相对重绘也会错位。
+
+        需要扣除的像素开销：
+        - contentsMargins：QSS 的 margin 与边框；
+        - documentMargin：QTextDocument 默认 4px 的文档边距（上下左右各一份）；
+        - 垂直滚动条宽度：它挤占右侧列宽，即使当前未显示也固定预留，
+          避免列数随滚动条出现/消失抖动。
+        不预留横向滚动条：内容按列硬换行，不会溢出到需要横向滚动。
+        """
+        from PyQt6.QtGui import QFontMetricsF
+        disp = self.terminal_display
+        try:
+            # 用浮点度量：高 DPI 缩放下单字符步进/行高常带小数，
+            # QFontMetrics 取整会向下抹掉小数，导致行列数偏大（底部行、最右列被裁）
+            fm = QFontMetricsF(disp.font())
+            char_width = fm.horizontalAdvance('M')
+            line_height = fm.lineSpacing()
+        except (RuntimeError, ValueError) as exc:
+            Logger.get_instance().debug(f"测量终端尺寸失败: {exc}")
+            return None
+        if char_width <= 0 or line_height <= 0:
+            return None
+
+        margins = disp.contentsMargins()
+        doc_margin = disp.document().documentMargin()
+        sb_width = 0
+        if disp.verticalScrollBarPolicy() != Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
+            sb_width = disp.verticalScrollBar().sizeHint().width()
+
+        avail_width = (disp.width() - margins.left() - margins.right()
+                       - sb_width - 2 * doc_margin)
+        avail_height = (disp.height() - margins.top() - margins.bottom()
+                        - 2 * doc_margin)
+        if avail_width <= 0 or avail_height <= 0:
+            return None
+        return max(20, int(avail_width // char_width)), max(5, int(avail_height // line_height))
+
     def _update_terminal_size(self):
         """根据终端显示控件的实际宽度计算列数并调整PTY大小
 
@@ -776,24 +820,10 @@ class SessionTab(QWidget):
         if not strategy or not hasattr(strategy, 'resize_pty'):
             return
 
-        # 基于字体度量计算终端可显示的列数和行数
-        from PyQt6.QtGui import QFontMetrics
-        font = self.terminal_display.font()
-        fm = QFontMetrics(font)
-
-        # 控件可用宽度（减去边距）
-        margins = self.terminal_display.contentsMargins()
-        avail_width = self.terminal_display.width() - margins.left() - margins.right() - 10  # 额外留10px余量
-        avail_height = self.terminal_display.height() - margins.top() - margins.bottom() - 10
-
-        # 计算列数和行数（确保最小值）
-        char_width = fm.horizontalAdvance('M')
-        line_height = fm.lineSpacing()
-        if char_width <= 0 or line_height <= 0:
+        size = self._measure_screen_size()
+        if not size:
             return
-
-        cols = max(20, avail_width // char_width)
-        rows = max(5, avail_height // line_height)
+        cols, rows = size
 
         # 避免重复设置相同大小
         prev = getattr(self, '_last_pty_size', None)
@@ -1234,22 +1264,16 @@ class SessionTab(QWidget):
     def _get_screen_cols(self):
         """当前终端屏幕列数（取最近一次 PTY 尺寸测量结果）
 
-        没有 PTY 尺寸时（串口、连接建立前）按控件实际宽度与字体度量估算，
-        避免固定 80 列导致宽窗口下的长行被错误折行。
+        没有 PTY 尺寸时（串口、连接建立前）按控件真实可视区估算，
+        与 PTY 尺寸走同一套口径（扣边距/文档边距/滚动条），
+        避免估算列数偏大导致最右列被裁。
         """
         prev = getattr(self, '_last_pty_size', None)
         if prev and len(prev) == 2:
             return max(20, int(prev[0]))
-        from PyQt6.QtGui import QFontMetrics
-        try:
-            fm = QFontMetrics(self.terminal_display.font())
-            char_width = fm.horizontalAdvance('M')
-            margins = self.terminal_display.contentsMargins()
-            avail = self.terminal_display.width() - margins.left() - margins.right()
-            if char_width > 0 and avail > 0:
-                return max(20, avail // char_width)
-        except (RuntimeError, ValueError) as exc:
-            Logger.get_instance().debug(f"估算终端列数失败: {exc}")
+        size = self._measure_screen_size()
+        if size:
+            return size[0]
         return 80
 
     @staticmethod
@@ -1470,10 +1494,18 @@ class SessionTab(QWidget):
     # ==================== 备用屏幕（vi/vim/less/man 全屏程序） ====================
 
     def _get_screen_rows(self):
-        """当前终端屏幕行数（取最近一次 PTY 尺寸测量结果）"""
+        """当前终端屏幕行数（取最近一次 PTY 尺寸测量结果）
+
+        没有 PTY 尺寸时按控件真实可视区估算，而不是固定 24 行：
+        固定行数一旦大于可视行数，全屏程序（nano/vi）底部的状态栏、
+        帮助行就会落在可视区之外。
+        """
         prev = getattr(self, '_last_pty_size', None)
         if prev and len(prev) == 2:
             return max(5, int(prev[1]))
+        size = self._measure_screen_size()
+        if size:
+            return size[1]
         return 24
 
     def _reset_screen_state(self):
@@ -1565,7 +1597,10 @@ class SessionTab(QWidget):
         MODE = QTextCursor.MoveMode
         rows = max(1, self._screen_rows)
         row = max(1, min(int(row), rows))
-        col = max(1, int(col))
+        # 真实终端会把列号钳制在屏幕宽度内：不钳制时 CUP 到屏幕右侧之外
+        # 会用空格把该行撑得比屏幕更宽，整行被裁且后续相对重绘错位
+        cols = max(1, self._get_screen_cols())
+        col = max(1, min(int(col), cols))
 
         cur_row = cursor.block().blockNumber() + 1
         if cur_row != row or cursor.document().blockCount() < rows:
@@ -4817,6 +4852,10 @@ class TerminalWidget(QWidget):
             session = session_data.get('tab')
             if session and hasattr(session, 'terminal_display'):
                 session.terminal_display.setFont(QFont("Consolas", safe_size))
+                # 字号变化会改变单字符宽/行高，PTY 行列数必须同步重算，
+                # 否则终端仍按旧字号的行列绘制，底部行/最右列会被裁掉
+                if hasattr(session, '_update_terminal_size'):
+                    session._update_terminal_size()
         # 字体大小属于视图设置，设一次即持久化
         self._save_terminal_settings()
 

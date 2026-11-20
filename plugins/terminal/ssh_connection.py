@@ -1,4 +1,5 @@
 import os
+import codecs
 import threading
 import time
 
@@ -22,6 +23,22 @@ class SSHConnection(ConnectionBase):
         self.client = None
         self.transport = None
         self.shell = None
+        # 增量 UTF-8 解码器：跨 recv 边界的多字节字符不能逐块解码
+        self._decoder = None
+
+    def _decode(self, data):
+        """按字节流增量解码 UTF-8
+
+        一个中文等多字节字符可能被 recv 切成两半分别返回。逐块
+        decode(errors='replace') 会把它变成两个 U+FFFD 替代字符：显示上
+        是乱码，字符数也比终端列数多，光标移动时会出现「一步两格」的错位。
+        增量解码器会把不完整的尾部字节留到下一次读取再拼接。
+        """
+        if not data:
+            return ''
+        if self._decoder is None:
+            self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        return self._decoder.decode(data)
 
     def connect(self, config):
         if not HAS_PARAMIKO:
@@ -70,6 +87,7 @@ class SSHConnection(ConnectionBase):
                 
                 self.transport = self.client.get_transport()
                 if self.transport:
+                    self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
                     self.shell = self.transport.open_session()
                     # 请求 PTY 时必须显式声明终端类型：paramiko 默认 term='vt100'，
                     # 真实 Ubuntu/OpenSSH 环境下 vt100 terminfo 缺少 khome/kend/kich1
@@ -104,6 +122,7 @@ class SSHConnection(ConnectionBase):
             Logger.get_instance().debug(f"关闭 SSH 连接失败: {exc}")
         self.shell = None
         self.client = None
+        self._decoder = None
 
     def send_command(self, command, timeout=5.0):
         """发送命令并等待响应
@@ -130,7 +149,7 @@ class SSHConnection(ConnectionBase):
             
             while time.time() < end_time:
                 if self.shell.recv_ready():
-                    data = self.shell.recv(4096).decode('utf-8', errors='replace')
+                    data = self._decode(self.shell.recv(4096))
                     response += data
                     time.sleep(0.1)
                 else:
@@ -229,7 +248,8 @@ class SSHConnection(ConnectionBase):
             
             # 读取所有可用数据，不阻塞
             while self.shell.recv_ready():
-                data = self.shell.recv(8192).decode('utf-8', errors='replace')
+                # 增量解码：避免多字节字符被 recv 边界切开后变成两个乱码字符
+                data = self._decode(self.shell.recv(8192))
                 response += data
                 
                 # 避免无限循环，设置超时
