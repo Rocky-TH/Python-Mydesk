@@ -10,11 +10,10 @@ from stat import S_ISDIR
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QLabel, QLineEdit, QComboBox, QSpinBox, QPushButton,
-    QTextEdit, QTabWidget, QTabBar, QMessageBox,
+    QTextEdit, QTabWidget, QTabBar,
     QListWidget, QListWidgetItem, QMenu, QDialog,
-    QPlainTextEdit, QFileDialog, QProgressDialog, QApplication,
-    QFrame, QStackedWidget, QToolButton,
-    QInputDialog
+    QPlainTextEdit, QProgressDialog, QApplication,
+    QFrame, QStackedWidget, QToolButton
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QEvent, QPoint
 from PyQt6.QtGui import (
@@ -28,6 +27,7 @@ from .connection_manager import ConnectionManager
 from .connection_factory import ConnectionFactory
 from utils.ansi_parser import ANSIParser
 from utils.logger import Logger
+from utils import dialog_helper
 from plugins.script_runner import Session, ScriptRunner
 
 # 下拉框三角形箭头图片路径
@@ -3074,9 +3074,8 @@ class TerminalButtonToolbar(QWidget):
             if btn_data:
                 self._open_edit_dialog(btn_data)
         elif action == delete_action:
-            reply = QMessageBox.question(self, "确认", "确定删除此按钮？",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
+            if dialog_helper.confirm(
+                    self, "确认", "确定删除此按钮？", self._config_manager, danger=True):
                 self.delete_button(btn_id)
 
     # ========== 编辑对话框 ==========
@@ -3315,13 +3314,14 @@ class TerminalWidget(QWidget):
 
     def prompt_custom_keepalive(self):
         """菜单「自定义…」：弹窗输入保活间隔，复用统一范围校验"""
-        value, ok = QInputDialog.getInt(
+        value = dialog_helper.get_int(
             self, "自定义保活时间",
             f"保活间隔（秒，{_KEEPALIVE_MIN}–{_KEEPALIVE_MAX}）：",
             int(self._keepalive_interval),
             _KEEPALIVE_MIN, _KEEPALIVE_MAX, 10,
+            self._config_manager
         )
-        if ok:
+        if value is not None:
             self.set_keepalive_interval(value)
 
     def _apply_keepalive(self, strategy, conn_type, interval):
@@ -4211,12 +4211,12 @@ class TerminalWidget(QWidget):
 
     def _browse_quick_key_file(self):
         """快速连接栏：浏览选择 SSH 密钥文件"""
-        from PyQt6.QtWidgets import QFileDialog
-        file_path, _ = QFileDialog.getOpenFileName(
+        file_path = dialog_helper.get_open_file_name(
             self,
             "选择密钥文件",
             self.qc_keyfile_input.text() or "",
-            "密钥文件 (*.pem *.key);;所有文件 (*)"
+            "密钥文件 (*.pem *.key);;所有文件 (*)",
+            self._config_manager
         )
         if file_path:
             self.qc_keyfile_input.setText(file_path)
@@ -4276,7 +4276,7 @@ class TerminalWidget(QWidget):
             baud=self.qc_baud_combo.currentText(),
         )
         if conn is None:
-            QMessageBox.warning(self, "提示", error)
+            dialog_helper.show_warning(self, "提示", error, self._config_manager)
             focus_widget = {
                 'serial_port': getattr(self, 'qc_serial_combo', None),
                 'host': getattr(self, 'qc_host_input', None),
@@ -4308,9 +4308,10 @@ class TerminalWidget(QWidget):
             name, conn['type'], conn['config']
         )
         if not ok:
-            QMessageBox.critical(
+            dialog_helper.show_error(
                 self, "保存失败",
-                "连接配置保存失败，请检查配置文件是否可写后重试。"
+                "连接配置保存失败，请检查配置文件是否可写后重试。",
+                self._config_manager
             )
             return
         # 同步保留快速连接栏内容
@@ -4328,9 +4329,10 @@ class TerminalWidget(QWidget):
             self._plugin_manager_ref.set_tool_status(
                 'Terminal', f"连接「{name}」已保存到连接列表"
             )
-        QMessageBox.information(
+        dialog_helper.show_info(
             self, "保存成功",
-            f"连接「{name}」已保存到左侧连接列表，可直接双击发起连接。"
+            f"连接「{name}」已保存到左侧连接列表，可直接双击发起连接。",
+            self._config_manager
         )
 
     # ========== 会话标签页右键菜单/快捷键 ==========
@@ -4395,7 +4397,7 @@ class TerminalWidget(QWidget):
         if session and session.current_connection:
             self.create_session(session.current_connection)
         else:
-            QMessageBox.information(self, "提示", "没有可复制的连接")
+            dialog_helper.show_info(self, "提示", "没有可复制的连接", self._config_manager)
 
     def _action_tab_reconnect(self):
         """使用当前会话的配置重新连接"""
@@ -4403,7 +4405,7 @@ class TerminalWidget(QWidget):
         if session and session.current_connection:
             session.connect_with_config(session.current_connection)
         else:
-            QMessageBox.information(self, "提示", "没有可重新连接的会话")
+            dialog_helper.show_info(self, "提示", "没有可重新连接的会话", self._config_manager)
 
     def _action_tab_disconnect(self):
         """断开当前会话连接"""
@@ -4411,7 +4413,7 @@ class TerminalWidget(QWidget):
         if session and session.connection_context.is_connected():
             session.disconnect()
         else:
-            QMessageBox.information(self, "提示", "当前会话未建立连接")
+            dialog_helper.show_info(self, "提示", "当前会话未建立连接", self._config_manager)
 
     def _action_tab_close(self):
         """关闭当前会话连接（断开连接并关闭标签页）"""
@@ -4709,7 +4711,7 @@ class TerminalWidget(QWidget):
             return
         session_tab = self.get_current_session()
         if not session_tab or not session_tab.connection_context.is_connected():
-            QMessageBox.warning(self, "警告", "请先建立连接")
+            dialog_helper.show_warning(self, "警告", "请先建立连接", self._config_manager)
             return
         # 防重入
         if btn_id in self._executing_workers:
@@ -5008,7 +5010,7 @@ class TerminalWidget(QWidget):
         """显示SFTP对话框"""
         session = self.get_current_session()
         if not session or not session.connection_context.is_connected():
-            QMessageBox.warning(self, "警告", "请先建立连接")
+            dialog_helper.show_warning(self, "警告", "请先建立连接", self._config_manager)
             return
         
         dialog = SFTPDialog(session.connection_context, self, config_manager=self._config_manager)
@@ -5139,14 +5141,9 @@ class TerminalWidget(QWidget):
         conn_id = conn.get('id')
         name = conn.get('name', '')
 
-        reply = QMessageBox.question(
-            self,
-            "确认删除",
-            f"确定要删除连接 '{name}' 吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
+        if dialog_helper.confirm(
+                self, "确认删除", f"确定要删除连接 '{name}' 吗？",
+                self._config_manager, danger=True):
             self.connection_manager.delete_connection(conn_id)
             self.load_connections()
 
@@ -5598,12 +5595,12 @@ class ConnectionDialog(QDialog):
 
     def browse_key_file(self):
         """浏览选择密钥文件"""
-        from PyQt6.QtWidgets import QFileDialog
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "选择密钥文件", 
-            "", 
-            "密钥文件 (*.pem *.key);;所有文件 (*)"
+        file_path = dialog_helper.get_open_file_name(
+            self,
+            "选择密钥文件",
+            "",
+            "密钥文件 (*.pem *.key);;所有文件 (*)",
+            self._config_manager
         )
         if file_path:
             self.key_file_input.setText(file_path)
@@ -5626,7 +5623,7 @@ class ConnectionDialog(QDialog):
         """确定：校验通过才关闭对话框，避免保存出无法连接的条目"""
         conn_data, error, focus_field = self._build_conn_data()
         if conn_data is None:
-            QMessageBox.warning(self, "提示", error)
+            dialog_helper.show_warning(self, "提示", error, self._config_manager)
             focus_widget = {
                 'serial_port': getattr(self, 'serial_port_combo', None),
                 'host': getattr(self, 'host_input', None),
@@ -5872,8 +5869,10 @@ class SFTPDialog(QDialog):
 
     def _browse_local_dir(self):
         """浏览选择本地目录"""
-        local_dir = QFileDialog.getExistingDirectory(
-            self, "选择本地目录", SFTPDialog._last_upload_dir)
+        local_dir = dialog_helper.get_existing_directory(
+            self, "选择本地目录", SFTPDialog._last_upload_dir,
+            config_manager=self._config_manager
+        )
         if local_dir:
             SFTPDialog._last_upload_dir = local_dir
             SFTPDialog._last_download_dir = local_dir
@@ -6154,11 +6153,13 @@ class SFTPDialog(QDialog):
         if not isinstance(strategy, SSHConnection):
             self._set_status("SFTP状态: 仅支持SSH连接", text_danger)
             self.set_buttons_enabled(False)
+            self._show_connection_error("当前连接不是 SSH，无法建立 SFTP 连接。")
             return
 
         if not strategy.client:
             self._set_status("SFTP状态: SSH未连接", text_danger)
             self.set_buttons_enabled(False)
+            self._show_connection_error("SSH 连接未建立，请先在终端中完成连接。")
             return
 
         try:
@@ -6170,6 +6171,12 @@ class SFTPDialog(QDialog):
         except Exception as e:
             self._set_status(f"SFTP状态: 连接失败 ({str(e)})", text_danger)
             self.set_buttons_enabled(False)
+            self._show_connection_error(f"SFTP 连接失败：{e}")
+
+    def _show_connection_error(self, message):
+        """连接不可用时弹出与主题一致、字体清晰的错误提示"""
+        dialog_helper.show_error(
+            self, "SFTP 连接失败", message, self._config_manager)
 
     def _set_status(self, text, color):
         """统一设置状态栏文本和颜色"""
@@ -6322,10 +6329,13 @@ class SFTPDialog(QDialog):
     def upload(self):
         """上传文件到远程"""
         if not self.sftp:
-            QMessageBox.warning(self, "警告", "SFTP未连接")
+            dialog_helper.show_warning(self, "警告", "SFTP未连接", self._config_manager)
             return
 
-        local_file, _ = QFileDialog.getOpenFileName(self, "选择要上传的文件", SFTPDialog._last_upload_dir)
+        local_file = dialog_helper.get_open_file_name(
+            self, "选择要上传的文件", SFTPDialog._last_upload_dir,
+            config_manager=self._config_manager
+        )
         if not local_file:
             return
 
@@ -6375,20 +6385,23 @@ class SFTPDialog(QDialog):
     def download(self):
         """下载文件到本地"""
         if not self.sftp:
-            QMessageBox.warning(self, "警告", "SFTP未连接")
+            dialog_helper.show_warning(self, "警告", "SFTP未连接", self._config_manager)
             return
 
         item = self.file_list.currentItem()
         if not item:
-            QMessageBox.information(self, "提示", "请先选择要下载的文件")
+            dialog_helper.show_info(self, "提示", "请先选择要下载的文件", self._config_manager)
             return
 
         data = item.data(Qt.ItemDataRole.UserRole)
         if not data or data['type'] != 'file':
-            QMessageBox.information(self, "提示", "只能选择文件进行下载")
+            dialog_helper.show_info(self, "提示", "只能选择文件进行下载", self._config_manager)
             return
 
-        local_dir = QFileDialog.getExistingDirectory(self, "选择下载目录", SFTPDialog._last_download_dir)
+        local_dir = dialog_helper.get_existing_directory(
+            self, "选择下载目录", SFTPDialog._last_download_dir,
+            config_manager=self._config_manager
+        )
         if not local_dir:
             return
 
@@ -6625,11 +6638,11 @@ class _ShortcutEditDialog(QDialog):
 
     def _browse_path(self):
         """浏览选择本地目录"""
-        from PyQt6.QtWidgets import QFileDialog
         current_path = self.path_input.text().strip()
         if not current_path:
             current_path = os.path.expanduser("~")
-        local_dir = QFileDialog.getExistingDirectory(self, "选择本地目录", current_path)
+        local_dir = dialog_helper.get_existing_directory(
+            self, "选择本地目录", current_path, self._config_manager)
         if local_dir:
             self.path_input.setText(local_dir)
 
@@ -6889,8 +6902,10 @@ class ButtonEditDialog(QDialog):
 
     def _browse_script(self):
         """浏览选择脚本文件"""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择脚本文件", SCRIPTS_DIR, "Python Files (*.py)")
+        path = dialog_helper.get_open_file_name(
+            self, "选择脚本文件", SCRIPTS_DIR, "Python Files (*.py)",
+            self._config_manager
+        )
         if path:
             self.script_path_input.setText(path)
             self._update_preview(path)
@@ -6929,22 +6944,23 @@ class ButtonEditDialog(QDialog):
         """确定按钮：校验并接受"""
         name = self.name_input.text().strip()
         if not name:
-            QMessageBox.warning(self, "提示", "请输入按钮名称")
+            dialog_helper.show_warning(self, "提示", "请输入按钮名称", self._config_manager)
             return
 
         btn_type = self.type_combo.currentData()
         if btn_type == 'command':
             cmd = self.cmd_input.toPlainText().strip()
             if not cmd:
-                QMessageBox.warning(self, "提示", "请输入命令内容")
+                dialog_helper.show_warning(self, "提示", "请输入命令内容", self._config_manager)
                 return
         else:
             path = self.script_path_input.text().strip()
             if not path:
-                QMessageBox.warning(self, "提示", "请选择脚本文件")
+                dialog_helper.show_warning(self, "提示", "请选择脚本文件", self._config_manager)
                 return
             if not os.path.isfile(path) or not path.endswith('.py'):
-                QMessageBox.warning(self, "提示", "脚本文件不存在或不是 .py 文件")
+                dialog_helper.show_warning(
+                    self, "提示", "脚本文件不存在或不是 .py 文件", self._config_manager)
                 return
 
         self.accept()

@@ -10,7 +10,7 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QVBoxLayout
+    QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout
 )
 
 
@@ -210,15 +210,55 @@ def get_text(parent, title, label, default='', config_manager=None, placeholder=
     return None
 
 
-def get_existing_directory(parent, caption, directory='', config_manager=None):
-    """非原生目录选择对话框（主题样式 + 中文按钮），返回目录路径。"""
-    dialog = QFileDialog(parent, caption, directory)
-    dialog.setFileMode(QFileDialog.FileMode.Directory)
-    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+def get_int(parent, title, label, value=0, minimum=0, maximum=100, step=1,
+            config_manager=None):
+    """显示中文主题化整数输入框。
+
+    返回用户输入的整数；用户取消时返回 None。
+    """
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setMinimumWidth(360)
+    dialog.setStyleSheet(_dialog_qss(config_manager))
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(16, 16, 16, 16)
+    layout.setSpacing(10)
+
+    layout.addWidget(QLabel(label))
+
+    spin_box = QSpinBox()
+    spin_box.setRange(minimum, maximum)
+    spin_box.setSingleStep(step)
+    spin_box.setValue(max(minimum, min(maximum, value)))
+    layout.addWidget(spin_box)
+
+    button_layout = QHBoxLayout()
+    button_layout.addStretch()
+    cancel_btn = QPushButton('取消')
+    ok_btn = QPushButton('确定')
+    ok_btn.setDefault(True)
+    _style_button(cancel_btn, config_manager, 'button-secondary')
+    _style_button(ok_btn, config_manager, 'button')
+    cancel_btn.clicked.connect(dialog.reject)
+    ok_btn.clicked.connect(dialog.accept)
+    button_layout.addWidget(cancel_btn)
+    button_layout.addWidget(ok_btn)
+    layout.addLayout(button_layout)
+
+    spin_box.setFocus()
+    spin_box.selectAll()
+
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        return spin_box.value()
+    return None
+
+
+def _configure_file_dialog(dialog, config_manager, file_name_label='文件名:'):
+    """为非原生文件对话框设置中文标签、主题 QSS 与按钮样式。"""
     dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-    # setLabelText 会触发非原生对话框的控件创建，之后才可找到按钮
     dialog.setLabelText(QFileDialog.DialogLabel.LookIn, '查看')
-    dialog.setLabelText(QFileDialog.DialogLabel.FileName, '文件夹:')
+    dialog.setLabelText(QFileDialog.DialogLabel.FileName, file_name_label)
     dialog.setLabelText(QFileDialog.DialogLabel.FileType, '文件类型:')
     dialog.setLabelText(QFileDialog.DialogLabel.Accept, '选择')
     dialog.setLabelText(QFileDialog.DialogLabel.Reject, '取消')
@@ -234,6 +274,29 @@ def get_existing_directory(parent, caption, directory='', config_manager=None):
             button_box.button(QDialogButtonBox.StandardButton.Cancel),
             config_manager, 'button-secondary'
         )
+
+
+def get_open_file_name(parent, caption, directory='', file_filter='',
+                       config_manager=None):
+    """非原生文件选择对话框（主题样式 + 中文按钮），返回文件路径。"""
+    dialog = QFileDialog(parent, caption, directory)
+    dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+    if file_filter:
+        dialog.setNameFilter(file_filter)
+    _configure_file_dialog(dialog, config_manager)
+
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        selected = dialog.selectedFiles()
+        return selected[0] if selected else ''
+    return ''
+
+
+def get_existing_directory(parent, caption, directory='', config_manager=None):
+    """非原生目录选择对话框（主题样式 + 中文按钮），返回目录路径。"""
+    dialog = QFileDialog(parent, caption, directory)
+    dialog.setFileMode(QFileDialog.FileMode.Directory)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    _configure_file_dialog(dialog, config_manager, '文件夹:')
 
     if dialog.exec() == QDialog.DialogCode.Accepted:
         selected = dialog.selectedFiles()
